@@ -80,7 +80,7 @@ export function modal(inner, opts = {}) {
   box.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => close()));
   document.body.appendChild(wrap);
   const first = box.querySelector("[autofocus], input, button");
-  if (first) setTimeout(() => first.focus(), 30);
+  if (first) first.focus(); // na hora, para não roubar o foco de quem já começou a digitar
   return { el: box, close };
 }
 
@@ -134,3 +134,20 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export function formatCode(code) {
   return String(code).replace(/(\d{3})(\d{3})/, "$1 $2");
 }
+
+// Liga/desliga a tela cheia. Devolve false se o navegador não permitir.
+export function toggleFullscreen() {
+  const d = document, el = d.documentElement;
+  if (d.fullscreenElement || d.webkitFullscreenElement) {
+    const exit = d.exitFullscreen || d.webkitExitFullscreen;
+    try { const r = exit.call(d); if (r && r.catch) r.catch(() => {}); } catch {}
+    return true;
+  }
+  const enter = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (!enter) return false;
+  try { const r = enter.call(el); if (r && r.catch) r.catch(() => {}); } catch { return false; }
+  return true;
+}
+
+export const NO_FULLSCREEN =
+  "Este navegador não permite tela cheia. No iPad, abra o site no Safari e use Compartilhar → Adicionar à Tela de Início: ele abre sem as barras.";

@@ -11,14 +11,65 @@ import { h, esc, icon, toast, modal, confirmBox, popover } from "./ui.js";
 const app = document.getElementById("app");
 const COVERS = ["#2347d9", "#e5383b", "#1e9e61", "#f0a202", "#7c3aed", "#14213d"];
 const WATCH_KEY = "traco.watch";
+const VERSION = "5"; // aparece no rodapé do início, para conferir se a atualização chegou
 let current = null; // tela aberta (editor ou espectador)
 let user = session();
 
 // Safari: impede o zoom da página inteira por gesto
 document.addEventListener("gesturestart", (e) => e.preventDefault());
 
+// A tela do caderno ocupa exatamente a área visível do navegador. Em iPad e
+// celular essa área muda (barras que somem, teclado) e a página pode ficar
+// deslocada; aqui ela é medida e realinhada sempre que isso acontece.
+const vv = window.visualViewport;
+function fitApp() {
+  const hgt = Math.round(vv ? vv.height : window.innerHeight);
+  document.documentElement.style.setProperty("--app-h", hgt + "px");
+  if (document.body.classList.contains("is-app") && (window.scrollY || window.scrollX || (vv && (vv.offsetTop || vv.offsetLeft)))) {
+    window.scrollTo(0, 0);
+  }
+}
+window.addEventListener("resize", fitApp);
+window.addEventListener("orientationchange", () => setTimeout(fitApp, 250));
+window.addEventListener("scroll", fitApp, { passive: true });
+if (vv) { vv.addEventListener("resize", fitApp); vv.addEventListener("scroll", fitApp); }
+document.addEventListener("fullscreenchange", () => setTimeout(fitApp, 120));
+document.addEventListener("webkitfullscreenchange", () => setTimeout(fitApp, 120));
+fitApp();
+
+function enterApp() {
+  window.scrollTo(0, 0);
+  document.body.classList.add("is-app");
+  fitApp();
+}
+
+let pending = null; // código vindo de um link direto que não está no ar
+
 window.addEventListener("hashchange", route);
-route();
+{
+  // Link direto: https://site/?c=123456 entra na transmissão sem digitar.
+  const direct = new URLSearchParams(location.search).get("c");
+  if (direct && /^\d{6}$/.test(direct)) {
+    history.replaceState(null, "", location.pathname + location.hash);
+    joinDirect(direct);
+  } else route();
+}
+
+async function joinDirect(code) {
+  try {
+    if (await roomIsLive(code)) {
+      sessionStorage.setItem(WATCH_KEY, code);
+      if (location.hash === "#ao-vivo") route();
+      else location.hash = "ao-vivo";
+      return;
+    }
+    pending = { code, error: "Esta transmissão não está no ar. Ela pode ter sido encerrada." };
+  } catch {
+    pending = { code, error: "Sem conexão com o servidor. Confira a internet e tente de novo." };
+  }
+  if (location.hash) history.replaceState(null, "", location.pathname);
+  route();
+}
 if (user) {
   api("/api/me").catch((e) => {
     if (e.status === 401) { setSession(null); user = null; if (!current) home(); }
@@ -31,14 +82,14 @@ async function route() {
   if (hash === "ao-vivo") {
     const code = sessionStorage.getItem(WATCH_KEY);
     if (code) {
-      document.body.classList.add("is-app");
+      enterApp();
       current = new Viewer(app, code, { onExit: () => { sessionStorage.removeItem(WATCH_KEY); location.hash = ""; } });
       return;
     }
   } else if (hash.startsWith("c/") && user) {
     const nb = await store.getNotebook(hash.slice(2));
     if (nb && nb.owner === user.email) {
-      document.body.classList.add("is-app");
+      enterApp();
       current = new Editor(app, nb, { onExit: () => { location.hash = ""; } });
       return;
     }
@@ -81,6 +132,7 @@ async function home() {
           <button class="btn" data-a="login">Entrar na conta</button>
         </section>`}
       </main>
+      <p class="version">Traço, versão ${VERSION}</p>
       <input type="file" accept="application/pdf,.pdf" hidden data-f="pdf">
     </div>`;
   bindCode();
@@ -119,6 +171,11 @@ function bindCode() {
   const cells = [...form.querySelectorAll(".cell")];
   const err = app.querySelector(".code-error");
   const btn = form.querySelector("button");
+  if (pending) { // veio de um link direto que não deu certo
+    input.value = pending.code;
+    err.textContent = pending.error;
+    pending = null;
+  }
   const paint = () => {
     const v = input.value;
     cells.forEach((c, i) => {

@@ -4,7 +4,7 @@
 import { Board } from "./board.js";
 import * as ink from "./ink.js";
 import { ViewerLink } from "./net.js";
-import { h, icon, formatCode } from "./ui.js";
+import { h, icon, formatCode, toast, toggleFullscreen, NO_FULLSCREEN } from "./ui.js";
 
 export class Viewer {
   constructor(root, code, opts) {
@@ -48,7 +48,11 @@ export class Viewer {
     this.board = new Board(q(".stage"), {
       readonly: true, fit: "contain", insetTop: 58, insetBottom: 54,
       // se a pessoa mexer no zoom por conta própria, para de acompanhar
-      onView: (v, user) => { if (user && this.followView) { this.followView = false; this.updatePager(); } },
+      onView: (v, user) => {
+        if (!user) return;
+        this.lastManual = performance.now();
+        if (this.followView) { this.followView = false; this.updatePager(); }
+      },
     });
 
     q(".viewer").addEventListener("click", (e) => {
@@ -82,7 +86,7 @@ export class Viewer {
     cancelAnimationFrame(this.anim);
     this.link.close();
     this.board.destroy();
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    if (document.fullscreenElement || document.webkitFullscreenElement) toggleFullscreen();
   }
 
   exit() {
@@ -90,9 +94,7 @@ export class Viewer {
   }
 
   fullscreen() {
-    const el = this.root.querySelector(".viewer");
-    if (document.fullscreenElement) document.exitFullscreen();
-    else if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+    if (!toggleFullscreen()) toast(NO_FULLSCREEN, { ms: 8000 });
   }
 
   status(s) {
@@ -213,6 +215,12 @@ export class Viewer {
     if (m.k === "vw") { // enquadramento do apresentador
       if (!Array.isArray(m.r) || m.r.length !== 4) return;
       this.hostView = { pg: m.pg, r: m.r };
+      // Quem mexeu no próprio zoom volta a acompanhar sozinho depois de
+      // alguns segundos parado, quando o apresentador muda o enquadramento.
+      if (!this.followView && this.follow && performance.now() - (this.lastManual || 0) > 6000) {
+        this.followView = true;
+        this.updatePager();
+      }
       this.applyHostView(true);
       return;
     }

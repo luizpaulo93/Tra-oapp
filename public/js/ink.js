@@ -252,7 +252,7 @@ export function applyOp(items, delIds, putItems) {
 
 // ---------- formas ----------
 
-export function shapePoints(kind, x0, y0, x1, y1) {
+export function shapePoints(kind, x0, y0, x1, y1, w = 3) {
   const pts = [];
   const add = (x, y) => pts.push(r1(x), r1(y), 0.5);
   const line = (ax, ay, bx, by) => {
@@ -264,7 +264,8 @@ export function shapePoints(kind, x0, y0, x1, y1) {
   else if (kind === "arrow") {
     line(x0, y0, x1, y1);
     const ang = Math.atan2(y1 - y0, x1 - x0);
-    const L = Math.min(28, Math.hypot(x1 - x0, y1 - y0) * 0.4);
+    // ponta sempre do mesmo tamanho, seja a seta curta ou comprida
+    const L = Math.max(22, w * 2.5);
     line(x1, y1, x1 - L * Math.cos(ang - 0.45), y1 - L * Math.sin(ang - 0.45));
     line(x1 - L * Math.cos(ang - 0.45), y1 - L * Math.sin(ang - 0.45), x1, y1);
     line(x1, y1, x1 - L * Math.cos(ang + 0.45), y1 - L * Math.sin(ang + 0.45));

@@ -29,9 +29,15 @@ body {
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
 }
-body.is-app { overflow: hidden; position: fixed; inset: 0; overscroll-behavior: none; }
+/* No caderno e na transmissão, o app ocupa exatamente a área visível
+   (medida em main.js), sem rolagem e sem sobra embaixo. */
+html:has(body.is-app) { overflow: hidden; height: 100%; }
+body.is-app {
+  overflow: hidden; position: fixed; top: 0; left: 0; right: 0;
+  height: var(--app-h, 100dvh); overscroll-behavior: none;
+}
 #app { min-height: 100%; }
-body.is-app #app { height: 100%; }
+body.is-app #app { height: 100%; min-height: 0; }
 h1, h2, h3, p { margin: 0; }
 button, input { font: inherit; color: inherit; }
 button { cursor: pointer; }
@@ -146,6 +152,7 @@ button { cursor: pointer; }
   background: #fff7e2; font-size: 15px; line-height: 1.45;
 }
 .empty { margin-top: 28px; color: var(--ink-soft); }
+.version { margin-top: 48px; font-size: 13px; color: #8a94a8; }
 .covers { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 20px; margin-top: 24px; }
 .cover { position: relative; }
 .cover-open {
@@ -287,6 +294,13 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 }
 .tools-main::-webkit-scrollbar, .tools-opts::-webkit-scrollbar { display: none; }
 .tools-opts { gap: 8px; padding: 6px 10px; min-height: 48px; }
+/* cores e espessuras só aparecem ao tocar na ferramenta */
+.tools:not(.show-opts) .tools-opts { display: none; }
+.tools .ib { position: relative; }
+.tool-ink {
+  position: absolute; right: 7px; bottom: 7px; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--c); box-shadow: 0 0 0 1.5px #fff;
+}
 .tools-opts .seg { flex: none; }
 .hint { padding: 0 6px; color: var(--ink-soft); font-size: 14px; font-weight: 600; white-space: nowrap; }
 .size { display: inline-flex; align-items: center; gap: 8px; flex: none; margin-left: 4px; }
@@ -319,6 +333,29 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   font-size: 38px; font-weight: 800; color: var(--blue); font-variant-numeric: tabular-nums;
 }
 .big-code span:nth-child(3) { margin-right: 12px; }
+.live-count { margin-left: auto; color: var(--ink-soft); font-weight: 600; }
+.live-tag { width: 100%; }
+.share { display: flex; align-items: center; gap: 16px; }
+.share-side { display: grid; gap: 6px; min-width: 0; }
+.share .big-code { justify-content: flex-start; gap: 5px; margin: 0; }
+.share .big-code span { width: 34px; height: 46px; font-size: 26px; border-radius: 9px; }
+.share .big-code span:nth-child(3) { margin-right: 8px; }
+.qr {
+  flex: none; width: 132px; height: 132px; padding: 0; border: 2px solid var(--rule); border-radius: 12px;
+  background: #fff; overflow: hidden; line-height: 0; cursor: zoom-in;
+}
+.qr:hover { border-color: var(--blue); }
+.qr svg, .qr-big svg { display: block; width: 100%; height: 100%; }
+.link-row { display: flex; gap: 8px; }
+.link-row input { flex: 1; min-width: 0; font-size: 14px !important; color: var(--ink-soft); }
+.qr-full {
+  position: fixed; inset: 0; z-index: 90; display: grid; align-content: center; justify-items: center; gap: 14px;
+  padding: 16px; background: #fff; cursor: zoom-out; outline: 0;
+}
+.qr-big { width: min(86vw, 62vh); height: min(86vw, 62vh); }
+.qr-full .big-code { margin: 0; }
+.qr-full .big-code span { width: clamp(40px, 9vw, 72px); height: clamp(54px, 12vw, 96px); font-size: clamp(30px, 7vw, 56px); }
+.qr-host { font-size: clamp(16px, 3vw, 24px); font-weight: 700; color: var(--ink-soft); overflow-wrap: anywhere; text-align: center; }
 
 /* ---------- espectador ---------- */
 
@@ -361,6 +398,9 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   .bar-title { flex-basis: 110px; }
   .modal { padding: 20px; }
   .big-code span { width: 42px; height: 58px; font-size: 30px; }
+  .share { gap: 12px; }
+  .qr { width: 108px; height: 108px; }
+  .share .big-code span { width: 28px; height: 40px; font-size: 22px; }
   .size input { width: 96px; }
 }
 

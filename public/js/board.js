@@ -13,6 +13,8 @@ export class Board {
     this.onView = opts.onView || (() => {});
     this.onPen = opts.onPen || (() => {});
     this.fingerDraw = opts.fingerDraw || (() => true);
+    this.penMode = opts.penMode || (() => false); // já se usou caneta neste aparelho?
+    this.lastPen = -1e9; // último sinal da caneta (inclui pairar sobre a tela)
     this.insetTop = opts.insetTop || 0; // espaço ocupado por barras flutuantes
     this.insetBottom = opts.insetBottom || 0;
     this.tool = null; // { start, move, end, cancel, hover }
@@ -407,14 +409,15 @@ export class Board {
   startGesture() {
     const a = this.activeTouches();
     if (a.length === 0) { this.gesture = null; return; }
+    const view0 = this.gesture && this.gesture.view0 ? this.gesture.view0 : { ...this.view };
     if (a.length === 1) {
-      this.gesture = { type: "pan", lx: a[0].x, ly: a[0].y, x0: a[0].x, y0: a[0].y, t0: performance.now(), moved: false };
+      this.gesture = { type: "pan", lx: a[0].x, ly: a[0].y, x0: a[0].x, y0: a[0].y, t0: performance.now(), moved: false, view0 };
     } else {
       const r = this.rect;
       const mx = (a[0].x + a[1].x) / 2 - r.left, my = (a[0].y + a[1].y) / 2 - r.top;
       this.gesture = {
         type: "pinch", d0: Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y) || 1, s0: this.view.s,
-        px: (mx - this.view.x) / this.view.s, py: (my - this.view.y) / this.view.s,
+        px: (mx - this.view.x) / this.view.s, py: (my - this.view.y) / this.view.s, view0,
       };
     }
   }
@@ -426,6 +429,23 @@ export class Board {
     return true;
   }
 
+  // Um toque que parece palma da mão apoiada: área grande, ou chegou
+  // enquanto a caneta escreve / logo depois de ela encostar ou pairar.
+  isPalm(e) {
+    if (this.readonly || !this.penMode()) return false;
+    if (this.draw && this.draw.type === "pen") return true;
+    if (performance.now() - this.lastPen < 1200) return true;
+    return Math.max(e.width || 0, e.height || 0) >= 60;
+  }
+
+  // Encerra o traço em andamento (se houver) guardando o que já foi escrito.
+  finishDraw(discard) {
+    const d = this.draw;
+    if (!d) return;
+    this.draw = null;
+    if (discard) this.tool.cancel(); else this.tool.end();
+  }
+
   onDown(e) {
     if (e.pointerType === "mouse" && e.button === 2) return;
     this.rect = this.root.getBoundingClientRect();
@@ -433,12 +453,11 @@ export class Board {
     e.preventDefault();
 
     if (e.pointerType === "touch") {
-      const t = { id: e.pointerId, x: e.clientX, y: e.clientY, ignore: !!(this.draw && this.draw.type === "pen") };
+      const t = { id: e.pointerId, x: e.clientX, y: e.clientY, ignore: this.isPalm(e) };
       this.touches.set(e.pointerId, t);
       if (t.ignore) return;
       if (this.draw && this.draw.type === "touch") { // segundo dedo: vira zoom/arrasto
-        this.tool.cancel();
-        this.draw = null;
+        this.finishDraw(true);
         this.startGesture();
         return;
       }
@@ -452,13 +471,18 @@ export class Board {
     }
 
     if (e.pointerType === "pen") {
+      this.lastPen = performance.now();
       this.onPen();
-      // palma apoiada: ignora os toques que já estavam na tela
+      // palma apoiada: ignora os toques que já estavam na tela e desfaz
+      // qualquer deslocamento que eles tenham causado na página
       for (const t of this.touches.values()) t.ignore = true;
+      const g = this.gesture;
       this.gesture = null;
-      if (this.draw && this.draw.type === "touch") { this.tool.cancel(); this.draw = null; }
+      if (g && g.view0 && !this.readonly) this.setView(g.view0);
     }
-    if (this.draw) return;
+    // Se um traço anterior ficou "preso" (o navegador não avisou que a caneta
+    // levantou), ele é encerrado aqui e o novo traço começa normalmente.
+    if (this.draw) this.finishDraw(this.draw.type === "touch");
     if (!this.canDrawWith(e)) {
       this.gesture = { type: "drag", id: e.pointerId, lx: e.clientX, ly: e.clientY };
       this.root.classList.add("grabbing");
@@ -469,14 +493,22 @@ export class Board {
   }
 
   onMove(e) {
+    if (e.pointerType === "pen") this.lastPen = performance.now();
     if (this.draw && e.pointerId === this.draw.id) {
       const list = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
-      const evs = list.length ? list : [e];
       const pts = [];
-      for (const ev of evs) {
+      for (const ev of list) {
+        // alguns navegadores entregam eventos intermediários sem posição
+        if (ev.clientX === 0 && ev.clientY === 0 && (e.clientX !== 0 || e.clientY !== 0)) continue;
         const p = this.toPage(ev);
-        p.pr = ev.pressure; p.t = ev.timeStamp;
+        p.pr = ev.pressure; p.t = ev.timeStamp || e.timeStamp;
         pts.push(p);
+      }
+      const last = this.toPage(e);
+      const tail = pts[pts.length - 1];
+      if (!tail || Math.abs(tail.x - last.x) + Math.abs(tail.y - last.y) > 1e-6) {
+        last.pr = e.pressure; last.t = e.timeStamp;
+        pts.push(last);
       }
       this.tool.move(pts, e);
       return;
@@ -489,9 +521,13 @@ export class Board {
       const g = this.gesture;
       const a = this.activeTouches();
       if (g.type === "pan") {
+        if (!g.moved) { // só começa a arrastar depois de um movimento claro
+          if (Math.hypot(t.x - g.x0, t.y - g.y0) < 8) return;
+          g.moved = true; g.lx = t.x; g.ly = t.y;
+          return;
+        }
         const dx = t.x - g.lx, dy = t.y - g.ly;
         g.lx = t.x; g.ly = t.y;
-        if (Math.hypot(t.x - g.x0, t.y - g.y0) > 8) g.moved = true;
         this.setView({ s: this.view.s, x: this.view.x + dx, y: this.view.y + dy }, true);
       } else if (g.type === "pinch" && a.length >= 2) {
         const r = this.rect;
@@ -515,10 +551,11 @@ export class Board {
 
   onUp(e) {
     try { this.root.releasePointerCapture(e.pointerId); } catch {}
+    if (e.pointerType === "pen") this.lastPen = performance.now();
     if (this.draw && e.pointerId === this.draw.id) {
-      this.draw = null;
-      if (e.type === "pointercancel") this.tool.cancel();
-      else this.tool.end(e);
+      // Se o sistema interromper a caneta no meio, o que foi escrito fica.
+      // Só o traço de dedo interrompido é descartado (costuma ser gesto do sistema).
+      this.finishDraw(e.type === "pointercancel" && this.draw.type === "touch");
     }
     if (e.pointerType === "touch") {
       const g = this.gesture;
@@ -531,6 +568,7 @@ export class Board {
           this.lastTap = 0;
         } else this.lastTap = now;
       }
+      if (this.activeTouches().length === 0) this.gesture = null;
       this.startGesture();
       return;
     }

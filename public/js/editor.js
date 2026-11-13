@@ -6,7 +6,8 @@ import * as ink from "./ink.js";
 import * as store from "./store.js";
 import { api, HostLink } from "./net.js";
 import { readPdf, readImage, exportPdf, download, pageAssets } from "./pdfio.js";
-import { h, esc, icon, toast, modal, confirmBox, popover, sleep, formatCode } from "./ui.js";
+import { h, esc, icon, toast, modal, confirmBox, popover, sleep, formatCode, toggleFullscreen, NO_FULLSCREEN } from "./ui.js";
+import { qrSvg } from "./qr.js";
 
 const PEN_COLORS = ["#14213d", "#2347d9", "#e5383b", "#1e9e61", "#f08c00", "#7c3aed"];
 const HL_COLORS = ["#ffe14d", "#9bec8a", "#ffa6c9", "#8fd3ff", "#ffc06a"];
@@ -46,7 +47,10 @@ export class Editor {
     this.link = null;
     this.viewers = 0;
     this.uploaded = new Set();
+    // Já se usou caneta neste aparelho? (liga a rejeição de palma desde o início)
     this.penSeen = false;
+    try { this.penSeen = localStorage.getItem("traco.pen") === "1"; } catch {}
+    this.optsOpen = false; // cores e espessuras só aparecem ao tocar na ferramenta
     this.saveTimers = new Map();
     this.build();
     this.start();
@@ -68,6 +72,7 @@ export class Editor {
           <button class="ib" data-a="pages" title="Páginas" aria-label="Páginas">${icon("pages")}</button>
           <button class="ib" data-a="paper" title="Papel" aria-label="Papel">${icon("paper")}</button>
           <button class="ib" data-a="export" title="Exportar em PDF" aria-label="Exportar em PDF">${icon("download")}</button>
+          <button class="ib" data-a="full" title="Tela cheia" aria-label="Tela cheia">${icon("full")}</button>
           <button class="live-btn" data-a="live">${icon("live", 18)}<span>Transmitir</span></button>
         </header>
         <div class="stage-wrap">
@@ -94,11 +99,17 @@ export class Editor {
 
     this.board = new Board(q(".stage"), {
       fit: "width",
-      insetTop: 118,
+      insetTop: 74,
       insetBottom: 56,
+      penMode: () => this.penSeen,
       onView: () => this.viewChanged(),
       fingerDraw: () => (this.prefs.finger === null ? !this.penSeen : this.prefs.finger),
-      onPen: () => { if (!this.penSeen) { this.penSeen = true; this.renderTools(); } },
+      onPen: () => {
+        if (this.penSeen) return;
+        this.penSeen = true;
+        try { localStorage.setItem("traco.pen", "1"); } catch {}
+        this.renderTools();
+      },
     });
     this.board.tool = {
       start: (pt, e) => this.toolStart(pt, e),
@@ -185,6 +196,7 @@ export class Editor {
       case "pages": this.pagesPanel(); break;
       case "paper": this.paperPop(btn); break;
       case "export": this.exportDialog(); break;
+      case "full": if (!toggleFullscreen()) toast(NO_FULLSCREEN, { ms: 8000 }); break;
       case "live": this.link ? this.livePanel() : this.startLive(); break;
     }
   }
@@ -433,9 +445,11 @@ export class Editor {
     } else if (t === "laser") {
       opts += `<span class="hint">Quem assiste vê o ponteiro, e nada fica riscado</span>`;
     }
+    const inkOf = (k) => (k === "pen" ? p.pen.c : k === "hl" ? p.hl.c : null);
+    this.elTools.classList.toggle("show-opts", this.optsOpen);
     this.elTools.innerHTML =
       `<div class="tools-main">` +
-      TOOLS.map(([k, l]) => `<button class="ib${t === k ? " is-on" : ""}" data-tool="${k}" title="${l}" aria-label="${l}" aria-pressed="${t === k}">${icon(k)}</button>`).join("") +
+      TOOLS.map(([k, l]) => `<button class="ib${t === k ? " is-on" : ""}" data-tool="${k}" title="${l}" aria-label="${l}" aria-pressed="${t === k}">${icon(k)}${inkOf(k) ? `<i class="tool-ink" style="--c:${inkOf(k)}"></i>` : ""}</button>`).join("") +
       `<span class="tools-sep"></span><button class="ib${fingerOn ? " is-on" : ""}" data-finger title="Escrever com o dedo" aria-label="Escrever com o dedo" aria-pressed="${fingerOn}">${icon("finger")}</button></div>` +
       (opts ? `<div class="tools-opts">${opts}</div>` : "");
 
@@ -444,7 +458,11 @@ export class Editor {
       this.elTools.addEventListener("click", (e) => {
         const b = e.target.closest("button");
         if (!b) return;
-        if (b.dataset.tool) this.setTool(b.dataset.tool);
+        if (b.dataset.tool) {
+          // tocar na ferramenta abre as opções; tocar de novo fecha
+          if (b.dataset.tool === this.prefs.tool) this.showOpts(!this.optsOpen);
+          else { this.optsOpen = true; this.setTool(b.dataset.tool); }
+        }
         else if (b.dataset.color) { this.prefs[b.dataset.key].c = b.dataset.color; this.savePrefs(); this.renderTools(); }
         else if (b.dataset.shape) { this.prefs.shape = b.dataset.shape; this.savePrefs(); this.renderTools(); }
         else if (b.dataset.er) { this.prefs.er.mode = b.dataset.er; this.savePrefs(); this.renderTools(); }
@@ -470,9 +488,16 @@ export class Editor {
     }
   }
 
+  showOpts(on) {
+    this.optsOpen = on;
+    this.elTools.classList.toggle("show-opts", on);
+  }
+
   toolStart(pt, e) {
     const p = this.prefs;
     const tool = p.tool;
+    // ao começar a escrever, as opções saem da frente
+    if (this.optsOpen && !(tool === "lasso" && this.sel)) this.showOpts(false);
     const pg = this.page.id;
     const isPen = e.pointerType === "pen";
     if (tool === "pen" || tool === "hl") {
@@ -532,7 +557,7 @@ export class Editor {
       this.board.invalidateLive();
     } else if (a.tool === "shape") {
       const p = pts[pts.length - 1];
-      a.s.p = ink.shapePoints(this.prefs.shape, a.x0, a.y0, p.x, p.y);
+      a.s.p = ink.shapePoints(this.prefs.shape, a.x0, a.y0, p.x, p.y, a.s.w);
       a.changed = true;
       this.board.invalidateLive();
     } else if (a.tool === "eraser") {
@@ -710,7 +735,7 @@ export class Editor {
     this.sel = { items, box: b, single };
     this.board.selection = { box: b, items, dx: 0, dy: 0, scale: 1, handle: single };
     this.board.invalidateLive();
-    if (this.prefs.tool === "lasso") this.renderTools();
+    if (this.prefs.tool === "lasso") { this.optsOpen = true; this.renderTools(); } // mostra "Excluir seleção"
   }
 
   clearSel() {
@@ -719,7 +744,7 @@ export class Editor {
     this.board.selection = null;
     this.board.hidden = new Set();
     this.board.invalidateLive();
-    if (this.prefs.tool === "lasso") this.renderTools();
+    if (this.prefs.tool === "lasso") { this.optsOpen = false; this.renderTools(); }
   }
 
   deleteSel() {
@@ -950,26 +975,62 @@ export class Editor {
     b.title = on ? "Ver código e encerrar" : "Transmitir este caderno ao vivo";
     const n = document.querySelector("[data-viewers]");
     if (n) n.textContent = this.viewers === 1 ? "1 pessoa assistindo" : `${this.viewers} pessoas assistindo`;
+    if (!on) document.querySelectorAll(".qr-full").forEach((q) => q.remove());
   }
 
+  shareLink() {
+    return `${location.origin}/?c=${this.code}`;
+  }
+
+  // Compartilhar: código, link direto para copiar e QR code (toque para ampliar).
   livePanel() {
-    const site = location.host;
+    const link = this.shareLink();
+    const digits = [...String(this.code)].map((d) => `<span>${d}</span>`).join("");
     const m = modal(`<div class="live-panel">
-        <p class="live-tag"><span class="live-dot"></span> Ao vivo</p>
-        <p class="muted">Quem for assistir abre <strong>${esc(site)}</strong> e digita este código:</p>
-        <div class="big-code" aria-label="Código da transmissão">${[...String(this.code)].map((d) => `<span>${d}</span>`).join("")}</div>
-        <p class="muted" data-viewers></p>
-        <div class="row"><button class="btn" data-copy>${icon("copy", 18)} Copiar convite</button><span class="bar-gap"></span>
-        <button class="btn is-danger" data-stop>Encerrar transmissão</button><button class="btn is-primary" data-close>Continuar</button></div>
+        <p class="live-tag"><span class="live-dot"></span> Ao vivo <span class="live-count" data-viewers></span></p>
+        <div class="share">
+          <button class="qr" data-qr title="Ampliar o QR code" aria-label="Ampliar o QR code">${qrSvg(link)}</button>
+          <div class="share-side">
+            <p class="muted">Código da transmissão</p>
+            <div class="big-code" aria-label="Código da transmissão">${digits}</div>
+            <p class="note">Toque no QR code para mostrar em tela cheia.</p>
+          </div>
+        </div>
+        <label class="field"><span>Link direto</span>
+          <span class="link-row"><input readonly value="${esc(link)}" aria-label="Link direto"><button class="btn" type="button" data-copy>${icon("copy", 18)} Copiar</button></span>
+        </label>
+        <div class="row end"><button class="btn is-danger" data-stop>Encerrar transmissão</button><button class="btn is-primary" data-close>Continuar</button></div>
       </div>`, { cls: "is-small", onClose: () => { this.liveModal = null; } });
     this.liveModal = m;
     this.updateLive();
+    const input = m.el.querySelector(".link-row input");
+    input.addEventListener("focus", () => input.select());
     m.el.querySelector("[data-copy]").onclick = async () => {
-      const text = `Assista ao vivo: abra ${location.origin} e digite o código ${formatCode(this.code)}`;
-      try { await navigator.clipboard.writeText(text); toast("Convite copiado."); }
-      catch { toast(text, { ms: 8000 }); }
+      try { await navigator.clipboard.writeText(link); toast("Link copiado."); }
+      catch {
+        input.focus(); input.select();
+        try { document.execCommand("copy"); toast("Link copiado."); }
+        catch { toast("Selecione o link e copie.", { ms: 5000 }); }
+      }
     };
+    m.el.querySelector("[data-qr]").onclick = () => this.qrFull();
     m.el.querySelector("[data-stop]").onclick = () => this.stopLive();
+  }
+
+  // QR code ocupando a tela toda, para a turma apontar a câmera.
+  qrFull() {
+    const el = h(`<div class="qr-full" role="dialog" aria-label="QR code da transmissão" tabindex="-1">
+      <div class="qr-big">${qrSvg(this.shareLink())}</div>
+      <div class="big-code">${[...String(this.code)].map((d) => `<span>${d}</span>`).join("")}</div>
+      <p class="qr-host">${esc(location.host)}</p>
+      <p class="note">Toque em qualquer lugar para fechar</p>
+    </div>`);
+    const close = () => { document.removeEventListener("keydown", key); el.remove(); };
+    const key = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+    el.addEventListener("click", close);
+    document.addEventListener("keydown", key);
+    document.body.appendChild(el);
+    el.focus();
   }
 
   sendOp(pg, d, p) {
