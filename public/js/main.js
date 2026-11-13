@@ -11,12 +11,20 @@ import { h, esc, icon, toast, modal, confirmBox, popover } from "./ui.js";
 const app = document.getElementById("app");
 const COVERS = ["#2347d9", "#e5383b", "#1e9e61", "#f0a202", "#7c3aed", "#14213d"];
 const WATCH_KEY = "traco.watch";
-const VERSION = "5"; // aparece no rodapé do início, para conferir se a atualização chegou
+const VERSION = "6"; // aparece no rodapé do início, para conferir se a atualização chegou
 let current = null; // tela aberta (editor ou espectador)
 let user = session();
 
 // Safari: impede o zoom da página inteira por gesto
 document.addEventListener("gesturestart", (e) => e.preventDefault());
+// No caderno, nada da interface pode ser "selecionado" como texto pela
+// caneta ou pelo dedo (só os campos de digitação).
+const editable = (t) => !!(t && t.closest && t.closest("input, textarea"));
+for (const type of ["selectstart", "dragstart"]) {
+  document.addEventListener(type, (e) => {
+    if (document.body.classList.contains("is-app") && !editable(e.target)) e.preventDefault();
+  });
+}
 
 // A tela do caderno ocupa exatamente a área visível do navegador. Em iPad e
 // celular essa área muda (barras que somem, teclado) e a página pode ficar

@@ -38,6 +38,12 @@ body.is-app {
 }
 #app { min-height: 100%; }
 body.is-app #app { height: 100%; min-height: 0; }
+/* Nada da interface vira "texto selecionado" ao escrever com caneta ou dedo. */
+body.is-app, body.is-app * {
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+}
+body.is-app input, body.is-app textarea { -webkit-user-select: text; user-select: text; }
+body.is-app .bar, body.is-app .tools, body.is-app .pager { touch-action: manipulation; }
 h1, h2, h3, p { margin: 0; }
 button, input { font: inherit; color: inherit; }
 button { cursor: pointer; }
@@ -250,11 +256,11 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 }
 .bar::-webkit-scrollbar { display: none; }
 .bar-title {
-  flex: 0 1 240px; min-width: 90px; height: 40px; padding: 0 10px; border: 1.5px solid transparent; border-radius: 10px;
-  background: transparent; font-weight: 700; font-size: 16px; text-overflow: ellipsis;
+  flex: 0 1 auto; min-width: 70px; max-width: 240px; height: 40px; padding: 0 10px; border: 1.5px solid transparent; border-radius: 10px;
+  background: transparent; font-weight: 700; font-size: 16px; text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .bar-title:hover { border-color: var(--line); }
-.bar-title:focus { outline: 0; border-color: var(--blue); }
 .bar-sep, .tools-sep { flex: none; width: 1.5px; height: 24px; margin: 0 6px; background: var(--line); }
 .live-btn {
   display: inline-flex; align-items: center; gap: 8px; flex: none; height: 40px; margin-left: 8px; padding: 0 16px;
@@ -395,7 +401,7 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   .covers { grid-template-columns: repeat(auto-fill, minmax(136px, 1fr)); gap: 14px; }
   .shelf-head .btn { flex: 1; }
   .shelf-head h2 { width: 100%; }
-  .bar-title { flex-basis: 110px; }
+  .bar-title { max-width: 110px; }
   .modal { padding: 20px; }
   .big-code span { width: 42px; height: 58px; font-size: 30px; }
   .share { gap: 12px; }

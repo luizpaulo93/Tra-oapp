@@ -15,6 +15,7 @@ export class Board {
     this.fingerDraw = opts.fingerDraw || (() => true);
     this.penMode = opts.penMode || (() => false); // já se usou caneta neste aparelho?
     this.lastPen = -1e9; // último sinal da caneta (inclui pairar sobre a tela)
+    this.lastTs = 0; // horário do último ponto aproveitado
     this.insetTop = opts.insetTop || 0; // espaço ocupado por barras flutuantes
     this.insetBottom = opts.insetBottom || 0;
     this.tool = null; // { start, move, end, cancel, hover }
@@ -498,17 +499,21 @@ export class Board {
       const list = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
       const pts = [];
       for (const ev of list) {
-        // alguns navegadores entregam eventos intermediários sem posição
+        // alguns navegadores entregam eventos intermediários sem posição,
+        // repetidos ou fora de ordem: esses ficam de fora
         if (ev.clientX === 0 && ev.clientY === 0 && (e.clientX !== 0 || e.clientY !== 0)) continue;
+        const ts = ev.timeStamp || 0;
+        if (ts && ts < this.lastTs) continue;
+        if (ts) this.lastTs = ts;
         const p = this.toPage(ev);
-        p.pr = ev.pressure; p.t = ev.timeStamp || e.timeStamp;
+        p.pr = ev.pressure; p.t = ts || e.timeStamp;
         pts.push(p);
       }
-      const last = this.toPage(e);
-      const tail = pts[pts.length - 1];
-      if (!tail || Math.abs(tail.x - last.x) + Math.abs(tail.y - last.y) > 1e-6) {
-        last.pr = e.pressure; last.t = e.timeStamp;
-        pts.push(last);
+      if (!pts.length) {
+        const p = this.toPage(e);
+        p.pr = e.pressure; p.t = e.timeStamp;
+        if (e.timeStamp) this.lastTs = e.timeStamp;
+        pts.push(p);
       }
       this.tool.move(pts, e);
       return;
@@ -522,7 +527,7 @@ export class Board {
       const a = this.activeTouches();
       if (g.type === "pan") {
         if (!g.moved) { // só começa a arrastar depois de um movimento claro
-          if (Math.hypot(t.x - g.x0, t.y - g.y0) < 8) return;
+          if (Math.hypot(t.x - g.x0, t.y - g.y0) < (this.penMode() && !this.readonly ? 16 : 8)) return;
           g.moved = true; g.lx = t.x; g.ly = t.y;
           return;
         }
@@ -533,6 +538,14 @@ export class Board {
         const r = this.rect;
         const d = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y) || 1;
         const mx = (a[0].x + a[1].x) / 2 - r.left, my = (a[0].y + a[1].y) / 2 - r.top;
+        if (!g.moved) { // dois toques parados (palma + dedo mínimo) não mexem na folha
+          if (g.mx0 === undefined) { g.mx0 = mx; g.my0 = my; }
+          if (Math.abs(d - g.d0) < 12 && Math.hypot(mx - g.mx0, my - g.my0) < 12) return;
+          g.moved = true;
+          g.d0 = d; g.s0 = this.view.s;
+          g.px = (mx - this.view.x) / this.view.s; g.py = (my - this.view.y) / this.view.s;
+          return;
+        }
         const s = g.s0 * (d / g.d0);
         this.setView({ s, x: mx - g.px * s, y: my - g.py * s }, true);
         const s2 = this.view.s;

@@ -21,14 +21,35 @@ export function radiusAt(s, i) {
   const half = s.w / 2;
   if (s.t !== "pen") return half;
   const pr = s.p[i * 3 + 2];
-  return half * (0.42 + 1.16 * pr);
+  return half * (0.7 + 0.6 * pr); // a pressão engrossa ou afina, sem exagero
+}
+
+// Linha central suavizada: tira o tremor fino da caneta (que amostra a
+// posição centenas de vezes por segundo) sem mudar o desenho. Formas
+// geométricas (s.g) ficam como estão, com cantos vivos.
+function centerline(s) {
+  const p = s.p;
+  const n = p.length / 3;
+  const X = new Float64Array(n), Y = new Float64Array(n), R = new Float64Array(n);
+  for (let i = 0; i < n; i++) { X[i] = p[i * 3]; Y[i] = p[i * 3 + 1]; R[i] = radiusAt(s, i); }
+  if (s.g || n < 3) return { X, Y, R, n };
+  for (let pass = 0; pass < 2; pass++) {
+    let px = X[0], py = Y[0], pr = R[0];
+    for (let i = 1; i < n - 1; i++) {
+      const cx = X[i], cy = Y[i], cr = R[i];
+      X[i] = (px + 2 * cx + X[i + 1]) / 4;
+      Y[i] = (py + 2 * cy + Y[i + 1]) / 4;
+      R[i] = (pr + 2 * cr + R[i + 1]) / 4;
+      px = cx; py = cy; pr = cr;
+    }
+  }
+  return { X, Y, R, n };
 }
 
 // Contorno do traço: um polígono que acompanha a linha central com a
 // espessura variando conforme a pressão, com pontas arredondadas.
 function outline(s) {
-  const p = s.p;
-  const n = p.length / 3;
+  const { X, Y, R, n } = centerline(s);
   const left = [];
   const right = [];
   let tx = 1, ty = 0;
@@ -36,20 +57,20 @@ function outline(s) {
   const minD2 = Math.max(0.04, (s.w * 0.08) ** 2);
 
   for (let i = 0; i < n; i++) {
-    const x = p[i * 3], y = p[i * 3 + 1];
-    const r = radiusAt(s, i);
-    const a = Math.max(i - 1, 0), b = Math.min(i + 1, n - 1);
-    let dx = p[b * 3] - p[a * 3], dy = p[b * 3 + 1] - p[a * 3 + 1];
+    const x = X[i], y = Y[i], r = R[i];
+    // direção medida numa janela larga, para não oscilar com pontos muito próximos
+    const a = Math.max(i - 2, 0), b = Math.min(i + 2, n - 1);
+    const dx = X[b] - X[a], dy = Y[b] - Y[a];
     const len = Math.hypot(dx, dy);
     if (len > 1e-6) { tx = dx / len; ty = dy / len; }
 
-    // Canto fechado (volta de mais de 90°): contorna o ponto com um círculo
-    // para a ponta não ficar "amassada".
+    // Canto fechado de verdade (volta de mais de 100°, com trechos de tamanho
+    // real): contorna o ponto com um círculo para a ponta não ficar "amassada".
     if (i > 0 && i < n - 1) {
-      const d1x = x - p[a * 3], d1y = y - p[a * 3 + 1];
-      const d2x = p[b * 3] - x, d2y = p[b * 3 + 1] - y;
+      const d1x = x - X[i - 1], d1y = y - Y[i - 1];
+      const d2x = X[i + 1] - x, d2y = Y[i + 1] - y;
       const l1 = Math.hypot(d1x, d1y), l2 = Math.hypot(d2x, d2y);
-      if (l1 > 1e-6 && l2 > 1e-6 && (d1x * d2x + d1y * d2y) / (l1 * l2) < -0.2) {
+      if (l1 > 0.5 && l2 > 0.5 && (d1x * d2x + d1y * d2y) / (l1 * l2) < -0.2) {
         const ox = (-d1y / l1) * r, oy = (d1x / l1) * r;
         for (let k = 0; k <= 6; k++) {
           const ang = (Math.PI * k) / 6;

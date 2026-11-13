@@ -63,7 +63,7 @@ export class Editor {
       <div class="editor">
         <header class="bar">
           <button class="ib" data-a="back" title="Voltar aos cadernos" aria-label="Voltar aos cadernos">${icon("back")}</button>
-          <input class="bar-title" value="${esc(this.nb.name)}" aria-label="Nome do caderno" maxlength="60">
+          <button class="bar-title" data-a="rename" title="Renomear caderno">${esc(this.nb.name)}</button>
           <span class="bar-gap"></span>
           <button class="ib" data-a="undo" title="Desfazer" aria-label="Desfazer">${icon("undo")}</button>
           <button class="ib" data-a="redo" title="Refazer" aria-label="Refazer">${icon("redo")}</button>
@@ -123,12 +123,6 @@ export class Editor {
     q(".editor").addEventListener("click", (e) => {
       const b = e.target.closest("[data-a]");
       if (b && !this.dead) this.action(b.dataset.a, b);
-    });
-    const title = q(".bar-title");
-    title.addEventListener("change", () => {
-      this.nb.name = title.value.trim() || "Caderno sem nome";
-      title.value = this.nb.name;
-      this.saveNb();
     });
     this.fImage.addEventListener("change", () => { const f = this.fImage.files[0]; this.fImage.value = ""; if (f) this.insertImage(f); });
     this.fPdf.addEventListener("change", () => { const f = this.fPdf.files[0]; this.fPdf.value = ""; if (f) this.insertPdf(f); });
@@ -197,8 +191,22 @@ export class Editor {
       case "paper": this.paperPop(btn); break;
       case "export": this.exportDialog(); break;
       case "full": if (!toggleFullscreen()) toast(NO_FULLSCREEN, { ms: 8000 }); break;
+      case "rename": this.renameDialog(btn); break;
       case "live": this.link ? this.livePanel() : this.startLive(); break;
     }
+  }
+
+  renameDialog(btn) {
+    const m = modal(`<form class="form"><h2>Renomear caderno</h2>
+      <label class="field"><span>Nome</span><input name="name" maxlength="60" value="${esc(this.nb.name)}" autofocus></label>
+      <div class="row end"><button class="btn" type="button" data-close>Cancelar</button><button class="btn is-primary" type="submit">Salvar nome</button></div></form>`, { cls: "is-small" });
+    m.el.querySelector("form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      this.nb.name = m.el.querySelector("input").value.trim() || "Caderno sem nome";
+      btn.textContent = this.nb.name;
+      this.saveNb();
+      m.close();
+    });
   }
 
   async exit() {
@@ -503,11 +511,11 @@ export class Editor {
     if (tool === "pen" || tool === "hl") {
       const pr = tool === "hl" ? 0.5 : isPen ? clamp(e.pressure || 0.2, 0.05, 1) : 0.5;
       const s = { id: ink.uid(), k: "s", t: tool, c: p[tool].c, w: p[tool].w, p: [ink.r1(pt.x), ink.r1(pt.y), pr] };
-      this.act = { tool, pg, s, isPen, lx: pt.x, ly: pt.y, pr, lt: e.timeStamp, sent: 0 };
+      this.act = { tool, pg, s, isPen, lx: pt.x, ly: pt.y, fx: pt.x, fy: pt.y, rx: pt.x, ry: pt.y, pr, lt: e.timeStamp, sent: 0 };
       this.board.liveStrokes.set(s.id, s);
       this.board.invalidateLive();
     } else if (tool === "shape") {
-      const s = { id: ink.uid(), k: "s", t: "pen", c: p.pen.c, w: p.pen.w, p: [] };
+      const s = { id: ink.uid(), k: "s", t: "pen", g: 1, c: p.pen.c, w: p.pen.w, p: [] }; // g: forma geométrica
       this.act = { tool, pg, s, x0: pt.x, y0: pt.y, changed: false };
       this.board.liveStrokes.set(s.id, s);
     } else if (tool === "eraser") {
@@ -533,26 +541,34 @@ export class Editor {
     if (!a) return;
     const v = this.board.view;
     if (a.tool === "pen" || a.tool === "hl") {
-      const minD = 0.45 / v.s;
+      // A caneta manda a posição centenas de vezes por segundo, com um tremor
+      // fino. Um filtro leve (que quase não atrasa) e um espaçamento mínimo
+      // entre pontos deixam o traço liso como o do dedo.
+      const minD = (a.isPen ? 1.1 : 0.8) / v.s;
+      const k = a.isPen ? 0.5 : 0.75;
       const arr = a.s.p;
       for (const p of pts) {
-        const d = Math.hypot(p.x - a.lx, p.y - a.ly);
+        a.rx = p.x; a.ry = p.y;
+        a.fx += (p.x - a.fx) * k;
+        a.fy += (p.y - a.fy) * k;
+        if (a.tool === "pen" && a.isPen) {
+          const raw = p.pr > 0 ? p.pr : a.pr;
+          a.pr += (raw - a.pr) * 0.3; // pressão também suavizada
+        }
+        const d = Math.hypot(a.fx - a.lx, a.fy - a.ly);
         if (d < minD) continue;
         let pr = 0.5;
         if (a.tool === "pen") {
-          if (a.isPen) {
-            const raw = p.pr > 0 ? p.pr : a.pr;
-            pr = a.pr + (raw - a.pr) * 0.6;
-          } else {
+          if (!a.isPen) {
             // sem caneta: simula a pressão pela velocidade (rápido = mais fino)
             const dt = Math.max(1, p.t - a.lt);
             const speed = (d * v.s) / dt;
-            pr = a.pr + (clamp(0.62 - speed * 0.16, 0.3, 0.62) - a.pr) * 0.2;
+            a.pr += (clamp(0.62 - speed * 0.16, 0.3, 0.62) - a.pr) * 0.2;
           }
-          a.pr = pr;
+          pr = a.pr;
         }
-        a.lx = p.x; a.ly = p.y; a.lt = p.t;
-        arr.push(ink.r1(p.x), ink.r1(p.y), Math.round(pr * 100) / 100);
+        a.lx = a.fx; a.ly = a.fy; a.lt = p.t;
+        arr.push(ink.r1(a.fx), ink.r1(a.fy), Math.round(pr * 100) / 100);
       }
       this.board.invalidateLive();
     } else if (a.tool === "shape") {
@@ -595,6 +611,9 @@ export class Editor {
         this.board.invalidateLive();
         this.sendLive({ k: "sx", id: a.s.id });
       } else {
+        if (a.tool !== "shape" && Math.hypot(a.rx - a.lx, a.ry - a.ly) > 0.3 / this.board.view.s) {
+          a.s.p.push(ink.r1(a.rx), ink.r1(a.ry), a.tool === "pen" ? Math.round(a.pr * 100) / 100 : 0.5);
+        }
         this.commit({ pg: a.pg, del: [], put: [a.s] }, { stroke: true });
       }
     } else if (a.tool === "eraser") {
