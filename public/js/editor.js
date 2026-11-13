@@ -17,10 +17,11 @@ const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const TOOLS = [
   ["pen", "Caneta"], ["hl", "Marca-texto"], ["eraser", "Borracha"],
   ["lasso", "Selecionar e mover"], ["shape", "Formas"], ["laser", "Laser (só aponta, não risca)"],
+  ["hand", "Mão: mover a folha e dar zoom"],
 ];
 
 function loadPrefs() {
-  const base = { tool: "pen", pen: { c: PEN_COLORS[0], w: 3 }, hl: { c: HL_COLORS[0], w: 26 }, er: { mode: "part", w: 22 }, shape: "line", finger: null };
+  const base = { tool: "pen", pen: { c: PEN_COLORS[0], w: 3 }, hl: { c: HL_COLORS[0], w: 26 }, er: { mode: "part", w: 22 }, shape: "line", dash: false };
   try {
     const p = JSON.parse(localStorage.getItem("traco.prefs")) || {};
     return { ...base, ...p, pen: { ...base.pen, ...p.pen }, hl: { ...base.hl, ...p.hl }, er: { ...base.er, ...p.er } };
@@ -40,6 +41,7 @@ export class Editor {
     this.index = 0;
     this.page = null;
     this.prefs = loadPrefs();
+    if (this.prefs.tool === "hand") this.prefs.tool = "pen"; // sempre abre pronto para escrever
     this.undoStack = [];
     this.redoStack = [];
     this.sel = null;
@@ -103,7 +105,10 @@ export class Editor {
       insetBottom: 56,
       penMode: () => this.penSeen,
       onView: () => this.viewChanged(),
-      fingerDraw: () => (this.prefs.finger === null ? !this.penSeen : this.prefs.finger),
+      // Neste aparelho já se usou caneta? Então só ela escreve; o dedo fica
+      // para os gestos. Sem caneta (celular), o dedo escreve.
+      fingerDraw: () => !this.penSeen,
+      handMode: () => this.prefs.tool === "hand",
       onPen: () => {
         if (this.penSeen) return;
         this.penSeen = true;
@@ -145,6 +150,25 @@ export class Editor {
     this.onHide = () => { if (document.visibilityState === "hidden") this.flushSaves(); };
     document.addEventListener("visibilitychange", this.onHide);
     this.renderTools();
+    this.debugPanel();
+  }
+
+  // Diagnóstico (abra o site com ?debug=1): mostra o que o aparelho está
+  // enviando, para descobrir a causa quando a escrita falha.
+  debugPanel() {
+    let on = false;
+    try { on = localStorage.getItem("traco.debug") === "1"; } catch {}
+    if (!on) return;
+    const el = h('<div class="dbg" aria-hidden="true"></div>');
+    this.root.querySelector(".stage-wrap").appendChild(el);
+    let errors = 0, lastErr = "";
+    this.onErr = (e) => { errors++; lastErr = String((e.error && e.error.message) || e.message || (e.reason && e.reason.message) || e.reason || "").slice(0, 60); };
+    window.addEventListener("error", this.onErr);
+    window.addEventListener("unhandledrejection", this.onErr);
+    this.dbgTimer = setInterval(() => {
+      const s = this.board.stats;
+      el.textContent = `caneta: ${s.pen} traços, ${s.cut} cortados pelo sistema | dedo: ${s.finger} | palma ignorada: ${s.palm} | último: ${s.last} | erros: ${errors}${lastErr ? " (" + lastErr + ")" : ""}`;
+    }, 400);
   }
 
   async start() {
@@ -169,6 +193,8 @@ export class Editor {
     document.removeEventListener("paste", this.onPaste);
     document.removeEventListener("visibilitychange", this.onHide);
     clearInterval(this.liveTimer);
+    clearInterval(this.dbgTimer);
+    if (this.onErr) { window.removeEventListener("error", this.onErr); window.removeEventListener("unhandledrejection", this.onErr); }
     clearTimeout(this.viewTimer);
     await this.flushSaves();
     if (this.link) this.stopLive(true);
@@ -429,7 +455,6 @@ export class Editor {
   renderTools() {
     const p = this.prefs;
     const t = p.tool;
-    const fingerOn = p.finger === null ? !this.penSeen : p.finger;
     let opts = "";
     const dots = (list, cur, key) =>
       list.map((c) => `<button class="dot${c === cur ? " is-on" : ""}" style="--c:${c}" data-color="${c}" data-key="${key}" aria-label="Cor ${c}"></button>`).join("") +
@@ -439,7 +464,8 @@ export class Editor {
     if (t === "pen" || t === "shape") {
       if (t === "shape") {
         opts += `<div class="seg">` + [["line", "Linha"], ["arrow", "Seta"], ["rect", "Retângulo"], ["ellipse", "Elipse"]]
-          .map(([k, l]) => `<button class="ib is-small${p.shape === k ? " is-on" : ""}" data-shape="${k}" title="${l}" aria-label="${l}">${icon(k, 18)}</button>`).join("") + `</div><span class="tools-sep"></span>`;
+          .map(([k, l]) => `<button class="ib is-small${p.shape === k ? " is-on" : ""}" data-shape="${k}" title="${l}" aria-label="${l}">${icon(k, 18)}</button>`).join("") + `</div>` +
+          `<div class="seg"><button class="chip${p.dash ? "" : " is-on"}" data-dash="0">Contínuo</button><button class="chip${p.dash ? " is-on" : ""}" data-dash="1">Pontilhado</button></div><span class="tools-sep"></span>`;
       }
       opts += dots(PEN_COLORS, p.pen.c, "pen") + size("pen", 1, 14, p.pen.w);
     } else if (t === "hl") {
@@ -452,13 +478,16 @@ export class Editor {
         : `<span class="hint">Contorne os traços ou toque em uma imagem</span>`;
     } else if (t === "laser") {
       opts += `<span class="hint">Quem assiste vê o ponteiro, e nada fica riscado</span>`;
+    } else if (t === "hand") {
+      opts += `<span class="hint">Arraste com a caneta ou o dedo para mover a folha; pince para dar zoom</span>`;
     }
+    this.board.root.classList.toggle("is-hand", t === "hand");
     const inkOf = (k) => (k === "pen" ? p.pen.c : k === "hl" ? p.hl.c : null);
     this.elTools.classList.toggle("show-opts", this.optsOpen);
     this.elTools.innerHTML =
       `<div class="tools-main">` +
       TOOLS.map(([k, l]) => `<button class="ib${t === k ? " is-on" : ""}" data-tool="${k}" title="${l}" aria-label="${l}" aria-pressed="${t === k}">${icon(k)}${inkOf(k) ? `<i class="tool-ink" style="--c:${inkOf(k)}"></i>` : ""}</button>`).join("") +
-      `<span class="tools-sep"></span><button class="ib${fingerOn ? " is-on" : ""}" data-finger title="Escrever com o dedo" aria-label="Escrever com o dedo" aria-pressed="${fingerOn}">${icon("finger")}</button></div>` +
+      `</div>` +
       (opts ? `<div class="tools-opts">${opts}</div>` : "");
 
     if (!this.toolsBound) {
@@ -474,14 +503,8 @@ export class Editor {
         else if (b.dataset.color) { this.prefs[b.dataset.key].c = b.dataset.color; this.savePrefs(); this.renderTools(); }
         else if (b.dataset.shape) { this.prefs.shape = b.dataset.shape; this.savePrefs(); this.renderTools(); }
         else if (b.dataset.er) { this.prefs.er.mode = b.dataset.er; this.savePrefs(); this.renderTools(); }
+        else if (b.dataset.dash) { this.prefs.dash = b.dataset.dash === "1"; this.savePrefs(); this.renderTools(); }
         else if (b.dataset.sel === "del") this.deleteSel();
-        else if ("finger" in b.dataset) {
-          const on = this.prefs.finger === null ? !this.penSeen : this.prefs.finger;
-          this.prefs.finger = !on;
-          this.savePrefs();
-          this.renderTools();
-          toast(this.prefs.finger ? "O dedo escreve. Use dois dedos para mover a página." : "O dedo move a página. Só a caneta escreve.");
-        }
       });
       this.elTools.addEventListener("input", (e) => {
         const i = e.target;
@@ -502,6 +525,7 @@ export class Editor {
   }
 
   toolStart(pt, e) {
+    if (this.act) this.toolEnd(false); // nunca deixa um traço anterior travar o próximo
     const p = this.prefs;
     const tool = p.tool;
     // ao começar a escrever, as opções saem da frente
@@ -516,6 +540,7 @@ export class Editor {
       this.board.invalidateLive();
     } else if (tool === "shape") {
       const s = { id: ink.uid(), k: "s", t: "pen", g: 1, c: p.pen.c, w: p.pen.w, p: [] }; // g: forma geométrica
+      if (p.dash) s.d = 1; // pontilhado
       this.act = { tool, pg, s, x0: pt.x, y0: pt.y, changed: false };
       this.board.liveStrokes.set(s.id, s);
     } else if (tool === "eraser") {
@@ -574,6 +599,7 @@ export class Editor {
     } else if (a.tool === "shape") {
       const p = pts[pts.length - 1];
       a.s.p = ink.shapePoints(this.prefs.shape, a.x0, a.y0, p.x, p.y, a.s.w);
+      if (a.s.d && a.s.p.shaft) a.s.dn = a.s.p.shaft; // na seta pontilhada, a ponta fica contínua
       a.changed = true;
       this.board.invalidateLive();
     } else if (a.tool === "eraser") {
@@ -1088,7 +1114,7 @@ export class Editor {
       }
     } else if (a.tool === "shape" && a.changed) {
       a.changed = false;
-      this.sendLive({ k: "sp", pg: a.pg, id: a.s.id, t: "pen", c: a.s.c, w: a.s.w, r: 1, p: a.s.p });
+      this.sendLive({ k: "sp", pg: a.pg, id: a.s.id, t: "pen", c: a.s.c, w: a.s.w, r: 1, g: 1, d: a.s.d, dn: a.s.dn, p: a.s.p });
     } else if (a.tool === "laser" && a.pend.length) {
       this.sendLive({ k: "lz", pg: a.pg, n: a.first ? 1 : 0, p: a.pend });
       a.pend = [];

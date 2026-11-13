@@ -11,7 +11,7 @@ import { h, esc, icon, toast, modal, confirmBox, popover } from "./ui.js";
 const app = document.getElementById("app");
 const COVERS = ["#2347d9", "#e5383b", "#1e9e61", "#f0a202", "#7c3aed", "#14213d"];
 const WATCH_KEY = "traco.watch";
-const VERSION = "6"; // aparece no rodapé do início, para conferir se a atualização chegou
+const VERSION = "7"; // aparece no rodapé do início, para conferir se a atualização chegou
 let current = null; // tela aberta (editor ou espectador)
 let user = session();
 
@@ -49,6 +49,15 @@ function enterApp() {
   window.scrollTo(0, 0);
   document.body.classList.add("is-app");
   fitApp();
+}
+
+// ?debug=1 liga (e ?debug=0 desliga) a linha de diagnóstico no caderno.
+{
+  const dbg = new URLSearchParams(location.search).get("debug");
+  try {
+    if (dbg === "1") localStorage.setItem("traco.debug", "1");
+    else if (dbg === "0") localStorage.removeItem("traco.debug");
+  } catch {}
 }
 
 let pending = null; // código vindo de um link direto que não está no ar

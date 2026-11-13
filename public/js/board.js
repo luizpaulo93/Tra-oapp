@@ -14,6 +14,7 @@ export class Board {
     this.onPen = opts.onPen || (() => {});
     this.fingerDraw = opts.fingerDraw || (() => true);
     this.penMode = opts.penMode || (() => false); // já se usou caneta neste aparelho?
+    this.handMode = opts.handMode || (() => false); // ferramenta "mão": tudo move a folha
     this.lastPen = -1e9; // último sinal da caneta (inclui pairar sobre a tela)
     this.lastTs = 0; // horário do último ponto aproveitado
     this.insetTop = opts.insetTop || 0; // espaço ocupado por barras flutuantes
@@ -59,6 +60,14 @@ export class Board {
     on("pointerleave", () => { if (!this.draw && this.cursor) { this.cursor = null; this.invalidateLive(); } });
     on("wheel", this.onWheel, { passive: false });
     on("contextmenu", (e) => e.preventDefault());
+    // No iPad, o sistema tenta transformar um toque demorado em seleção de
+    // texto, lupa ou arrasto, e quando faz isso corta a caneta no meio do
+    // traço. Recusar esses gestos aqui mantém a caneta sempre com o app.
+    for (const type of ["touchstart", "touchmove", "touchend"]) {
+      root.addEventListener(type, (e) => { if (e.cancelable) e.preventDefault(); }, { passive: false });
+    }
+    // contadores para diagnóstico (aparecem com ?debug=1)
+    this.stats = { pen: 0, cut: 0, palm: 0, finger: 0, last: "-" };
     on("dblclick", () => { if (this.readonly) this.fitView(); });
     this.keyDown = (e) => { if (e.code === "Space" && !/INPUT|TEXTAREA/.test(e.target.tagName)) this.spaceDown = true; };
     this.keyUp = (e) => { if (e.code === "Space") this.spaceDown = false; };
@@ -321,7 +330,7 @@ export class Board {
       if (!s.p.length) continue;
       ctx.globalAlpha = s.t === "hl" ? HL_ALPHA : 1;
       ctx.fillStyle = s.c;
-      ctx.fill(strokePath({ t: s.t, w: s.w, p: s.p }));
+      ctx.fill(strokePath({ t: s.t, w: s.w, p: s.p, g: s.g, d: s.d, dn: s.dn }));
     }
     ctx.globalAlpha = 1;
 
@@ -424,19 +433,23 @@ export class Board {
   }
 
   canDrawWith(e) {
-    if (this.readonly || !this.tool) return false;
+    if (this.readonly || !this.tool || this.handMode()) return false;
     if (e.pointerType === "mouse") return e.button === 0 && !this.spaceDown;
     if (e.pointerType === "touch") return this.fingerDraw();
     return true;
   }
 
-  // Um toque que parece palma da mão apoiada: área grande, ou chegou
-  // enquanto a caneta escreve / logo depois de ela encostar ou pairar.
-  isPalm(e) {
-    if (this.readonly || !this.penMode()) return false;
+  // Um toque que chega enquanto a caneta escreve (ou no instante seguinte)
+  // é a mão apoiada, não um gesto.
+  isPalm() {
+    if (this.readonly || !this.penMode() || this.handMode()) return false;
     if (this.draw && this.draw.type === "pen") return true;
-    if (performance.now() - this.lastPen < 1200) return true;
-    return Math.max(e.width || 0, e.height || 0) >= 60;
+    return performance.now() - this.lastPen < 350;
+  }
+
+  // Com caneta, um dedo sozinho não move a folha (só dois dedos, ou a mão).
+  oneFingerLocked() {
+    return !this.readonly && this.penMode() && !this.handMode();
   }
 
   // Encerra o traço em andamento (se houver) guardando o que já foi escrito.
@@ -454,9 +467,11 @@ export class Board {
     e.preventDefault();
 
     if (e.pointerType === "touch") {
-      const t = { id: e.pointerId, x: e.clientX, y: e.clientY, ignore: this.isPalm(e) };
+      const t = { id: e.pointerId, x: e.clientX, y: e.clientY, ignore: this.isPalm() };
       this.touches.set(e.pointerId, t);
-      if (t.ignore) return;
+      this.stats.last = "toque";
+      if (t.ignore) { this.stats.palm++; return; }
+      this.stats.finger++;
       if (this.draw && this.draw.type === "touch") { // segundo dedo: vira zoom/arrasto
         this.finishDraw(true);
         this.startGesture();
@@ -472,14 +487,18 @@ export class Board {
     }
 
     if (e.pointerType === "pen") {
-      this.lastPen = performance.now();
+      this.stats.pen++;
+      this.stats.last = "caneta";
       this.onPen();
-      // palma apoiada: ignora os toques que já estavam na tela e desfaz
-      // qualquer deslocamento que eles tenham causado na página
-      for (const t of this.touches.values()) t.ignore = true;
-      const g = this.gesture;
-      this.gesture = null;
-      if (g && g.view0 && !this.readonly) this.setView(g.view0);
+      if (!this.handMode() && !this.readonly) {
+        this.lastPen = performance.now();
+        // palma apoiada: ignora os toques que já estavam na tela e desfaz
+        // qualquer deslocamento que eles tenham causado na página
+        for (const t of this.touches.values()) t.ignore = true;
+        const g = this.gesture;
+        this.gesture = null;
+        if (g && g.view0) this.setView(g.view0);
+      }
     }
     // Se um traço anterior ficou "preso" (o navegador não avisou que a caneta
     // levantou), ele é encerrado aqui e o novo traço começa normalmente.
@@ -494,8 +513,8 @@ export class Board {
   }
 
   onMove(e) {
-    if (e.pointerType === "pen") this.lastPen = performance.now();
     if (this.draw && e.pointerId === this.draw.id) {
+      if (this.draw.type === "pen") this.lastPen = performance.now();
       const list = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
       const pts = [];
       for (const ev of list) {
@@ -526,8 +545,9 @@ export class Board {
       const g = this.gesture;
       const a = this.activeTouches();
       if (g.type === "pan") {
+        if (this.oneFingerLocked()) return;
         if (!g.moved) { // só começa a arrastar depois de um movimento claro
-          if (Math.hypot(t.x - g.x0, t.y - g.y0) < (this.penMode() && !this.readonly ? 16 : 8)) return;
+          if (Math.hypot(t.x - g.x0, t.y - g.y0) < 8) return;
           g.moved = true; g.lx = t.x; g.ly = t.y;
           return;
         }
@@ -540,7 +560,8 @@ export class Board {
         const mx = (a[0].x + a[1].x) / 2 - r.left, my = (a[0].y + a[1].y) / 2 - r.top;
         if (!g.moved) { // dois toques parados (palma + dedo mínimo) não mexem na folha
           if (g.mx0 === undefined) { g.mx0 = mx; g.my0 = my; }
-          if (Math.abs(d - g.d0) < 12 && Math.hypot(mx - g.mx0, my - g.my0) < 12) return;
+          const slack = this.oneFingerLocked() ? 12 : 3;
+          if (Math.abs(d - g.d0) < slack && Math.hypot(mx - g.mx0, my - g.my0) < slack) return;
           g.moved = true;
           g.d0 = d; g.s0 = this.view.s;
           g.px = (mx - this.view.x) / this.view.s; g.py = (my - this.view.y) / this.view.s;
@@ -564,8 +585,9 @@ export class Board {
 
   onUp(e) {
     try { this.root.releasePointerCapture(e.pointerId); } catch {}
-    if (e.pointerType === "pen") this.lastPen = performance.now();
+    if (e.pointerType === "pen" && this.draw && this.draw.type === "pen") this.lastPen = performance.now();
     if (this.draw && e.pointerId === this.draw.id) {
+      if (e.type === "pointercancel" && this.draw.type === "pen") this.stats.cut++;
       // Se o sistema interromper a caneta no meio, o que foi escrito fica.
       // Só o traço de dedo interrompido é descartado (costuma ser gesto do sistema).
       this.finishDraw(e.type === "pointercancel" && this.draw.type === "touch");

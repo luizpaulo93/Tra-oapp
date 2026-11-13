@@ -285,7 +285,7 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 .board canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
 .board-layers { position: absolute; inset: 0; transform-origin: 0 0; will-change: transform; }
 .board .c-hl { mix-blend-mode: multiply; }
-.viewer .board { cursor: grab; }
+.viewer .board, .board.is-hand { cursor: grab; }
 .board.grabbing { cursor: grabbing; }
 
 .tools {
@@ -323,6 +323,10 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 .pager-num { min-width: 76px; height: 36px; padding: 0 8px; border: 0; border-radius: 10px; background: transparent; font-weight: 700; font-variant-numeric: tabular-nums; }
 .pager-num:hover { background: rgba(20, 33, 61, .07); }
 
+.dbg {
+  position: absolute; z-index: 6; left: 8px; bottom: calc(8px + env(safe-area-inset-bottom)); max-width: calc(100% - 16px);
+  padding: 4px 8px; border-radius: 8px; background: rgba(20, 33, 61, .82); color: #fff; font-size: 12px; pointer-events: none;
+}
 .thumbs { display: grid; gap: 12px; margin-top: 12px; }
 .thumb { display: flex; gap: 8px; align-items: flex-start; }
 .thumb-pic { flex: none; padding: 0; border: 2px solid var(--line); border-radius: 8px; background: #fff; overflow: hidden; line-height: 0; min-width: 154px; min-height: 80px; }

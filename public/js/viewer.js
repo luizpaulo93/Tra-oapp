@@ -229,6 +229,7 @@ export class Viewer {
     if (m.k === "sp") {
       let s = b.liveStrokes.get(m.id);
       if (!s) { s = { id: m.id, t: m.t, c: m.c, w: m.w, p: [] }; b.liveStrokes.set(m.id, s); }
+      s.g = m.g; s.d = m.d; s.dn = m.dn;
       if (m.r) s.p = m.p; else for (const v of m.p) s.p.push(v);
     } else if (m.k === "sx") {
       b.liveStrokes.delete(m.id);
