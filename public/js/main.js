@@ -11,7 +11,7 @@ import { h, esc, icon, toast, modal, confirmBox, popover } from "./ui.js";
 const app = document.getElementById("app");
 const COVERS = ["#2347d9", "#e5383b", "#1e9e61", "#f0a202", "#7c3aed", "#14213d"];
 const WATCH_KEY = "traco.watch";
-const VERSION = "7"; // aparece no rodapé do início, para conferir se a atualização chegou
+const VERSION = "8"; // aparece no rodapé do início, para conferir se a atualização chegou
 let current = null; // tela aberta (editor ou espectador)
 let user = session();
 

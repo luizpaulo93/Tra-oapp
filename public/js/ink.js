@@ -48,38 +48,48 @@ function centerline(s) {
 
 // Contorno do traço: um polígono que acompanha a linha central com a
 // espessura variando conforme a pressão, com pontas arredondadas.
+// Devolve também `joints`: pontos onde a linha dá meia-volta ou faz um
+// canto, que recebem um círculo para o traço ficar sempre boleado.
 function outline(s) {
   const { X, Y, R, n } = centerline(s);
   const left = [];
   const right = [];
+  const joints = [];
   let tx = 1, ty = 0;
   let lastLx = NaN, lastLy = NaN, lastRx = NaN, lastRy = NaN;
   const minD2 = Math.max(0.04, (s.w * 0.08) ** 2);
 
+  // comprimento acumulado ao longo da linha
+  const cum = new Float64Array(n);
+  for (let i = 1; i < n; i++) cum[i] = cum[i - 1] + Math.hypot(X[i] - X[i - 1], Y[i] - Y[i - 1]);
+
+  // direção inicial: a do traço inteiro (vale para risquinhos bem curtos)
+  const ol = Math.hypot(X[n - 1] - X[0], Y[n - 1] - Y[0]);
+  if (ol > 1e-6) { tx = (X[n - 1] - X[0]) / ol; ty = (Y[n - 1] - Y[0]) / ol; }
+
+  let a = 0, b = 0, lastJoint = -1;
   for (let i = 0; i < n; i++) {
     const x = X[i], y = Y[i], r = R[i];
-    // direção medida numa janela larga, para não oscilar com pontos muito próximos
-    const a = Math.max(i - 2, 0), b = Math.min(i + 2, n - 1);
-    const dx = X[b] - X[a], dy = Y[b] - Y[a];
+    // A direção é medida numa janela proporcional à espessura. Com pontos
+    // muito juntos (zoom alto, caneta devagar) e traço grosso, uma janela
+    // pequena faz a borda "dançar" e a ponta sair quadrada.
+    const reach = s.g ? 0 : Math.max(1, r * 0.7);
+    while (a < i - 1 && cum[i] - cum[a + 1] >= reach) a++;
+    if (a > i - 1) a = Math.max(i - 1, 0);
+    if (b < i + 1) b = Math.min(i + 1, n - 1);
+    while (b < n - 1 && cum[b] - cum[i] < reach) b++;
+    const ia = Math.min(a, Math.max(i - 1, 0));
+    const dx = X[b] - X[ia], dy = Y[b] - Y[ia];
     const len = Math.hypot(dx, dy);
-    if (len > 1e-6) { tx = dx / len; ty = dy / len; }
+    if (len > Math.max(1e-6, reach * 0.25)) { tx = dx / len; ty = dy / len; }
 
-    // Canto fechado de verdade (volta de mais de 100°, com trechos de tamanho
-    // real): contorna o ponto com um círculo para a ponta não ficar "amassada".
+    // meia-volta ou canto: marca para receber um círculo
     if (i > 0 && i < n - 1) {
-      const d1x = x - X[i - 1], d1y = y - Y[i - 1];
-      const d2x = X[i + 1] - x, d2y = Y[i + 1] - y;
+      const d1x = x - X[ia], d1y = y - Y[ia], d2x = X[b] - x, d2y = Y[b] - y;
       const l1 = Math.hypot(d1x, d1y), l2 = Math.hypot(d2x, d2y);
-      if (l1 > 0.5 && l2 > 0.5 && (d1x * d2x + d1y * d2y) / (l1 * l2) < -0.2) {
-        const ox = (-d1y / l1) * r, oy = (d1x / l1) * r;
-        for (let k = 0; k <= 6; k++) {
-          const ang = (Math.PI * k) / 6;
-          const c = Math.cos(ang), sn = Math.sin(ang);
-          left.push(x + (-ox * c - -oy * sn), y + (-ox * sn + -oy * c));
-          right.push(x + (ox * c + oy * sn), y + (-ox * sn + oy * c));
-        }
-        lastLx = lastRx = NaN;
-        continue;
+      if (l1 > 1e-6 && l2 > 1e-6 && (d1x * d2x + d1y * d2y) / (l1 * l2) < 0.5) {
+        const q = lastJoint < 0 ? null : joints[joints.length - 1];
+        if (!q || Math.hypot(x - q[0], y - q[1]) > r * 0.35) { joints.push([x, y, r]); lastJoint = i; }
       }
     }
 
@@ -93,7 +103,8 @@ function outline(s) {
       right.push(rx, ry); lastRx = rx; lastRy = ry;
     }
   }
-  return { left, right };
+  joints.push([X[0], Y[0], R[0]], [X[n - 1], Y[n - 1], R[n - 1]]);
+  return { left, right, joints };
 }
 
 // Corta a linha em trechos "ligados" de comprimento `dash`, separados por `gap`.
@@ -128,8 +139,11 @@ export function strokePath(s) {
     path = new Path2D();
     const dn = Math.min(n, s.dn || n);
     const dash = Math.max(9, s.w * 3.2), gap = Math.max(7, s.w * 2.6);
-    for (const run of dashRuns(s.p, dn, dash, gap)) path.addPath(solidPath({ t: s.t, w: s.w, g: 1, p: run }));
-    if (dn < n) path.addPath(solidPath({ t: s.t, w: s.w, g: 1, p: s.p.slice((dn - 1) * 3) }));
+    const caps = new Path2D();
+    const add = (sub) => { path.addPath(sub); if (sub.caps) caps.addPath(sub.caps); };
+    for (const run of dashRuns(s.p, dn, dash, gap)) add(solidPath({ t: s.t, w: s.w, g: 1, p: run }));
+    if (dn < n) add(solidPath({ t: s.t, w: s.w, g: 1, p: s.p.slice((dn - 1) * 3) }));
+    path.caps = caps;
   } else path = solidPath(s);
   pathCache.set(s, path);
   return path;
@@ -151,7 +165,12 @@ function solidPath(s) {
     return path;
   }
 
-  const { left, right } = outline(s);
+  const { left, right, joints } = outline(s);
+  // Círculos nas pontas, meias-voltas e cantos. São pintados à parte (ver
+  // fillStroke), então o arredondado é garantido seja qual for o desenho.
+  const caps = new Path2D();
+  for (const [x, y, r] of joints) { caps.moveTo(x + r, y); caps.arc(x, y, r, 0, TAU); }
+  path.caps = caps;
   const pts = [];
   for (let i = 0; i < left.length; i += 2) pts.push(left[i], left[i + 1]);
   // ponta final
@@ -382,7 +401,15 @@ export function drawPaper(ctx, page, paper, px) {
   ctx.restore();
 }
 
-export function drawStrokes(ctx, items, kind, view) {
+// Pinta um traço: o corpo e, por cima, os arremates redondos. Onde a tinta
+// é translúcida (marca-texto em andamento), `noCaps` evita pintar duas vezes.
+export function fillStroke(ctx, s, noCaps) {
+  const path = strokePath(s);
+  ctx.fill(path);
+  if (path.caps && !noCaps) ctx.fill(path.caps);
+}
+
+export function drawStrokes(ctx, items, kind, view, noCaps) {
   for (const it of items) {
     if (it.k !== "s" || (it.t === "hl") !== (kind === "hl")) continue;
     if (view) {
@@ -390,7 +417,7 @@ export function drawStrokes(ctx, items, kind, view) {
       if (b[2] < view[0] || b[0] > view[2] || b[3] < view[1] || b[1] > view[3]) continue;
     }
     ctx.fillStyle = it.c;
-    ctx.fill(strokePath(it));
+    fillStroke(ctx, it, noCaps);
   }
 }
 
@@ -416,11 +443,23 @@ export function drawPageFlat(ctx, page, opts) {
   ctx.rect(0, 0, page.w, page.h);
   ctx.clip();
   drawImages(ctx, page.items, getImg);
-  ctx.globalCompositeOperation = "multiply";
-  ctx.globalAlpha = HL_ALPHA;
-  drawStrokes(ctx, page.items, "hl");
-  ctx.globalAlpha = 1;
-  ctx.globalCompositeOperation = "source-over";
+  // Marca-texto: pintado opaco numa camada à parte e só então aplicado com
+  // transparência, igual ao que se vê na tela.
+  if (page.items.some((it) => it.k === "s" && it.t === "hl")) {
+    const layer = document.createElement("canvas");
+    layer.width = ctx.canvas.width;
+    layer.height = ctx.canvas.height;
+    const lx = layer.getContext("2d");
+    lx.setTransform(ctx.getTransform());
+    drawStrokes(lx, page.items, "hl");
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = "multiply";
+    ctx.globalAlpha = HL_ALPHA;
+    ctx.drawImage(layer, 0, 0);
+    ctx.restore();
+    layer.width = layer.height = 0;
+  }
   drawStrokes(ctx, page.items, "pen");
   ctx.restore();
 }

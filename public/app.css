@@ -284,7 +284,7 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 }
 .board canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
 .board-layers { position: absolute; inset: 0; transform-origin: 0 0; will-change: transform; }
-.board .c-hl { mix-blend-mode: multiply; }
+.board .c-hl { mix-blend-mode: multiply; opacity: .5; } /* marca-texto: translúcido e sem cobrir o texto */
 .viewer .board, .board.is-hand { cursor: grab; }
 .board.grabbing { cursor: grabbing; }
 

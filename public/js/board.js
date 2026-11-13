@@ -1,7 +1,7 @@
 // A "mesa": mostra uma página, cuida de zoom/arrasto e entrega os gestos de
 // escrita para quem a controla. Usada pelo apresentador e pelo espectador.
 
-import { drawPaper, drawStrokes, drawImages, strokePath, loadImage, bbox, HL_ALPHA } from "./ink.js";
+import { drawPaper, drawStrokes, drawImages, fillStroke, loadImage, bbox, HL_ALPHA } from "./ink.js";
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 
@@ -289,8 +289,7 @@ export class Board {
       this.transform(ctx);
       ctx.save();
       ctx.beginPath(); ctx.rect(0, 0, p.w, p.h); ctx.clip();
-      if (kind === "hl") ctx.globalAlpha = HL_ALPHA;
-      drawStrokes(ctx, items, kind, rect);
+      drawStrokes(ctx, items, kind, rect); // o marca-texto fica translúcido pelo CSS da camada
       ctx.restore();
     }
   }
@@ -304,9 +303,8 @@ export class Board {
     this.transform(ctx);
     ctx.save();
     ctx.beginPath(); ctx.rect(0, 0, p.w, p.h); ctx.clip();
-    if (s.t === "hl") ctx.globalAlpha = HL_ALPHA;
     ctx.fillStyle = s.c;
-    ctx.fill(strokePath(s));
+    fillStroke(ctx, s);
     ctx.restore();
     this.drawLive();
   }
@@ -330,7 +328,7 @@ export class Board {
       if (!s.p.length) continue;
       ctx.globalAlpha = s.t === "hl" ? HL_ALPHA : 1;
       ctx.fillStyle = s.c;
-      ctx.fill(strokePath({ t: s.t, w: s.w, p: s.p, g: s.g, d: s.d, dn: s.dn }));
+      fillStroke(ctx, { t: s.t, w: s.w, p: s.p, g: s.g, d: s.d, dn: s.dn }, s.t === "hl");
     }
     ctx.globalAlpha = 1;
 
@@ -347,7 +345,7 @@ export class Board {
           }
         }
         ctx.globalAlpha = HL_ALPHA;
-        drawStrokes(ctx, sel.items, "hl");
+        drawStrokes(ctx, sel.items, "hl", null, true);
         ctx.globalAlpha = 1;
         drawStrokes(ctx, sel.items, "pen");
       }

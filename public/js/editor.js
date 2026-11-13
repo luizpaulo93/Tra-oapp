@@ -21,10 +21,15 @@ const TOOLS = [
 ];
 
 function loadPrefs() {
-  const base = { tool: "pen", pen: { c: PEN_COLORS[0], w: 3 }, hl: { c: HL_COLORS[0], w: 26 }, er: { mode: "part", w: 22 }, shape: "line", dash: false };
+  // Cada ferramenta guarda a própria cor e espessura (caneta, marca-texto,
+  // borracha e formas): mexer em uma nunca altera a outra.
+  const base = {
+    tool: "pen", pen: { c: PEN_COLORS[0], w: 3 }, hl: { c: HL_COLORS[0], w: 26 }, er: { mode: "part", w: 22 },
+    sh: { c: PEN_COLORS[0], w: 3 }, shape: "line", dash: false,
+  };
   try {
     const p = JSON.parse(localStorage.getItem("traco.prefs")) || {};
-    return { ...base, ...p, pen: { ...base.pen, ...p.pen }, hl: { ...base.hl, ...p.hl }, er: { ...base.er, ...p.er } };
+    return { ...base, ...p, pen: { ...base.pen, ...p.pen }, hl: { ...base.hl, ...p.hl }, er: { ...base.er, ...p.er }, sh: { ...base.sh, ...p.sh } };
   } catch { return base; }
 }
 
@@ -460,14 +465,14 @@ export class Editor {
       list.map((c) => `<button class="dot${c === cur ? " is-on" : ""}" style="--c:${c}" data-color="${c}" data-key="${key}" aria-label="Cor ${c}"></button>`).join("") +
       `<label class="dot is-custom${list.includes(cur) ? "" : " is-on"}" style="--c:${list.includes(cur) ? "transparent" : cur}" title="Outra cor"><input type="color" value="${cur}" data-key="${key}"></label>`;
     const size = (key, min, max, val) =>
-      `<label class="size" title="Espessura"><span class="size-dot" style="--d:${clamp(val * (key === "pen" ? 1.6 : 0.5), 3, 20)}px"></span><input type="range" min="${min}" max="${max}" step="0.5" value="${val}" data-size="${key}" aria-label="Espessura"></label>`;
-    if (t === "pen" || t === "shape") {
-      if (t === "shape") {
-        opts += `<div class="seg">` + [["line", "Linha"], ["arrow", "Seta"], ["rect", "Retângulo"], ["ellipse", "Elipse"]]
-          .map(([k, l]) => `<button class="ib is-small${p.shape === k ? " is-on" : ""}" data-shape="${k}" title="${l}" aria-label="${l}">${icon(k, 18)}</button>`).join("") + `</div>` +
-          `<div class="seg"><button class="chip${p.dash ? "" : " is-on"}" data-dash="0">Contínuo</button><button class="chip${p.dash ? " is-on" : ""}" data-dash="1">Pontilhado</button></div><span class="tools-sep"></span>`;
-      }
+      `<label class="size" title="Espessura"><span class="size-dot" style="--d:${clamp(val * (key === "pen" || key === "sh" ? 1.6 : 0.5), 3, 20)}px"></span><input type="range" min="${min}" max="${max}" step="0.5" value="${val}" data-size="${key}" aria-label="Espessura"></label>`;
+    if (t === "pen") {
       opts += dots(PEN_COLORS, p.pen.c, "pen") + size("pen", 1, 14, p.pen.w);
+    } else if (t === "shape") {
+      opts += `<div class="seg">` + [["line", "Linha"], ["arrow", "Seta"], ["rect", "Retângulo"], ["ellipse", "Elipse"]]
+        .map(([k, l]) => `<button class="ib is-small${p.shape === k ? " is-on" : ""}" data-shape="${k}" title="${l}" aria-label="${l}">${icon(k, 18)}</button>`).join("") + `</div>` +
+        `<div class="seg"><button class="chip${p.dash ? "" : " is-on"}" data-dash="0">Contínuo</button><button class="chip${p.dash ? " is-on" : ""}" data-dash="1">Pontilhado</button></div><span class="tools-sep"></span>`;
+      opts += dots(PEN_COLORS, p.sh.c, "sh") + size("sh", 1, 14, p.sh.w);
     } else if (t === "hl") {
       opts += dots(HL_COLORS, p.hl.c, "hl") + size("hl", 10, 60, p.hl.w);
     } else if (t === "eraser") {
@@ -482,7 +487,7 @@ export class Editor {
       opts += `<span class="hint">Arraste com a caneta ou o dedo para mover a folha; pince para dar zoom</span>`;
     }
     this.board.root.classList.toggle("is-hand", t === "hand");
-    const inkOf = (k) => (k === "pen" ? p.pen.c : k === "hl" ? p.hl.c : null);
+    const inkOf = (k) => (k === "pen" ? p.pen.c : k === "hl" ? p.hl.c : k === "shape" ? p.sh.c : null);
     this.elTools.classList.toggle("show-opts", this.optsOpen);
     this.elTools.innerHTML =
       `<div class="tools-main">` +
@@ -511,7 +516,7 @@ export class Editor {
         if (i.dataset.size) {
           this.prefs[i.dataset.size].w = +i.value;
           const d = i.parentElement.querySelector(".size-dot");
-          if (d) d.style.setProperty("--d", clamp(+i.value * (i.dataset.size === "pen" ? 1.6 : 0.5), 3, 20) + "px");
+          if (d) d.style.setProperty("--d", clamp(+i.value * (i.dataset.size === "pen" || i.dataset.size === "sh" ? 1.6 : 0.5), 3, 20) + "px");
           this.savePrefs();
         } else if (i.type === "color") { this.prefs[i.dataset.key].c = i.value; this.savePrefs(); }
       });
@@ -539,7 +544,7 @@ export class Editor {
       this.board.liveStrokes.set(s.id, s);
       this.board.invalidateLive();
     } else if (tool === "shape") {
-      const s = { id: ink.uid(), k: "s", t: "pen", g: 1, c: p.pen.c, w: p.pen.w, p: [] }; // g: forma geométrica
+      const s = { id: ink.uid(), k: "s", t: "pen", g: 1, c: p.sh.c, w: p.sh.w, p: [] }; // g: forma geométrica
       if (p.dash) s.d = 1; // pontilhado
       this.act = { tool, pg, s, x0: pt.x, y0: pt.y, changed: false };
       this.board.liveStrokes.set(s.id, s);
@@ -569,7 +574,7 @@ export class Editor {
       // A caneta manda a posição centenas de vezes por segundo, com um tremor
       // fino. Um filtro leve (que quase não atrasa) e um espaçamento mínimo
       // entre pontos deixam o traço liso como o do dedo.
-      const minD = (a.isPen ? 1.1 : 0.8) / v.s;
+      const minD = Math.max((a.isPen ? 1.1 : 0.8) / v.s, a.s.w * 0.1);
       const k = a.isPen ? 0.5 : 0.75;
       const arr = a.s.p;
       for (const p of pts) {
