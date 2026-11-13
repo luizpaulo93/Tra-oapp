@@ -1,0 +1,22 @@
+{
+  // Configuração de publicação na Cloudflare (plano gratuito).
+  "name": "traco",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-04-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "vars": {
+    // Resumo SHA-256 do e-mail do administrador (o e-mail em si não fica aqui).
+    // O primeiro login com esse e-mail define a senha.
+    "ADMIN_EMAIL_SHA256": "011673ddf1f4a3101576d736c30e5c32795e157dc40c30e930ad74169ed42347"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOMS", "class_name": "Room" },
+      { "name": "AUTH", "class_name": "Auth" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room", "Auth"] }]
+}

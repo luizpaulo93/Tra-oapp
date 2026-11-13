@@ -1,0 +1,10 @@
+{
+  "name": "Traço: caderno ao vivo",
+  "short_name": "Traço",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#edf0f4",
+  "theme_color": "#edf0f4",
+  "lang": "pt-BR",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "traco",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Caderno ao vivo: escreva em PDFs e páginas e transmita por código.",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}
