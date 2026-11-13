@@ -3,6 +3,8 @@
   "name": "traco",
   "main": "src/worker.js",
   "compatibility_date": "2026-04-01",
+  // Liga o endereço público gratuito (algo como https://NOME.SUA-CONTA.workers.dev).
+  "workers_dev": true,
   "assets": {
     "directory": "./public",
     "binding": "ASSETS"
