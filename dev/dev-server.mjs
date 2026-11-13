@@ -78,7 +78,7 @@ function send(res, status, data) {
 
 const authCore = new AuthCore(makeCtx(() => {}), {
   email: process.env.ADMIN_EMAIL,
-  hash: process.env.ADMIN_EMAIL_SHA256 || "011673ddf1f4a3101576d736c30e5c32795e157dc40c30e930ad74169ed42347",
+  hash: process.env.ADMIN_EMAIL_SHA256 || "011673ddf1f4a3101576d736c30e5c32795e157dc40c30e930ad74169ed42347,40765a29f642d16d1d1e7f65e389a48c59fa5d2cba4ec28d067234c29ede633b",
 });
 let authQ = Promise.resolve();
 

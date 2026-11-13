@@ -53,10 +53,11 @@ Cloudflare publica sozinha a cada alteração no repositório.
   ou depois de 12 horas.
 - Plano gratuito da Cloudflare: se a cota do dia acabar, o site para de
   transmitir até as 21h (horário de Belém) e volta sozinho. Não há cobrança.
-- O e-mail do administrador não fica escrito no projeto, só o resumo
-  SHA-256 dele (`ADMIN_EMAIL_SHA256` em `wrangler.jsonc`). Para trocar de
-  administrador antes do primeiro login, substitua esse valor pelo SHA-256
-  do novo e-mail, em minúsculas.
+- Os e-mails dos administradores não ficam escritos no projeto, só o resumo
+  SHA-256 de cada um (`ADMIN_EMAIL_SHA256` em `wrangler.jsonc`, separados por
+  vírgula). Para incluir outro administrador, acrescente o SHA-256 do e-mail
+  dele, em minúsculas. No primeiro login ele define a própria senha.
+- Contas de administrador não podem ser removidas pela tela de Usuários.
 
 ## Pastas
 

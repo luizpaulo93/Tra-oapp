@@ -1,10 +1,12 @@
 // Contas e sessões. Um único objeto guarda todos os usuários.
 // As senhas nunca são guardadas: só um resumo (PBKDF2 com sal).
 //
-// Primeiro acesso: enquanto não existir administrador, o primeiro login
-// feito com o e-mail do administrador cria essa conta com a senha digitada
-// naquele momento. Nenhuma senha fica no código, e o e-mail também não:
-// a configuração guarda só o resumo SHA-256 dele (ADMIN_EMAIL_SHA256).
+// Administradores: a configuração guarda o resumo SHA-256 do e-mail de cada
+// um (ADMIN_EMAIL_SHA256, separados por vírgula). Nenhuma senha e nenhum
+// e-mail ficam no código. No primeiro login com um desses e-mails, a conta
+// de administrador é criada com a senha digitada naquele momento. Se o
+// e-mail já tiver conta comum, ela vira administradora no próximo login.
+// Contas de administrador não podem ser removidas por ninguém.
 
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const ITERATIONS = 40000;
@@ -40,8 +42,9 @@ export class AuthCore {
   // admin: { email?, hash? } — o e-mail em texto ou o seu resumo SHA-256
   constructor(ctx, admin = {}) {
     this.ctx = ctx;
-    this.adminEmail = normEmail(admin.email);
-    this.adminHash = String(admin.hash || "").trim().toLowerCase();
+    const list = (v) => String(v || "").toLowerCase().split(/[\s,;]+/).filter(Boolean);
+    this.adminEmails = list(admin.email);
+    this.adminHashes = list(admin.hash);
     this.ready = false;
     this.fails = new Map(); // e-mail -> { n, until }
   }
@@ -123,14 +126,12 @@ export class AuthCore {
     }
 
     let u = this.user(email);
-    // Primeiro acesso do administrador: a senha digitada passa a ser a senha.
-    if (!u && (await this.isAdminEmail(email))) {
-      const hasAdmin = this.sql.exec("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").toArray().length > 0;
-      if (!hasAdmin) {
-        if (password.length < 6) return fail(400, "weak", "A senha precisa ter pelo menos 6 caracteres.");
-        await this.setPassword(email, password, "admin");
-        u = this.user(email);
-      }
+    const isAdmin = await this.isAdminEmail(email);
+    // Primeiro acesso de um administrador: a senha digitada passa a ser a senha.
+    if (!u && isAdmin) {
+      if (password.length < 6) return fail(400, "weak", "A senha precisa ter pelo menos 6 caracteres.");
+      await this.setPassword(email, password, "admin");
+      u = this.user(email);
     }
 
     const good = u ? sameText(await hashPassword(password, u.salt), u.hash) : false;
@@ -141,6 +142,11 @@ export class AuthCore {
       return fail(401, "wrong", "E-mail ou senha incorretos.");
     }
     this.fails.delete(email);
+    // E-mail de administrador que já tinha conta comum: passa a administrar.
+    if (isAdmin && u.role !== "admin") {
+      this.sql.exec("UPDATE users SET role = 'admin' WHERE email = ?", email);
+      u = this.user(email);
+    }
 
     this.sql.exec("DELETE FROM sessions WHERE exp < ?", Date.now());
     const token = rand(32);
@@ -149,9 +155,9 @@ export class AuthCore {
   }
 
   async isAdminEmail(email) {
-    if (this.adminEmail) return email === this.adminEmail;
-    if (!this.adminHash) return false;
-    return hex(await crypto.subtle.digest("SHA-256", enc.encode(email))) === this.adminHash;
+    if (this.adminEmails.includes(email)) return true;
+    if (!this.adminHashes.length) return false;
+    return this.adminHashes.includes(hex(await crypto.subtle.digest("SHA-256", enc.encode(email))));
   }
 
   async add(a) {

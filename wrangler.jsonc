@@ -10,9 +10,10 @@
     "binding": "ASSETS"
   },
   "vars": {
-    // Resumo SHA-256 do e-mail do administrador (o e-mail em si não fica aqui).
-    // O primeiro login com esse e-mail define a senha.
-    "ADMIN_EMAIL_SHA256": "011673ddf1f4a3101576d736c30e5c32795e157dc40c30e930ad74169ed42347"
+    // Administradores: resumo SHA-256 do e-mail de cada um, separados por
+    // vírgula (os e-mails em si não ficam aqui). O primeiro login com um
+    // desses e-mails define a senha daquela conta.
+    "ADMIN_EMAIL_SHA256": "011673ddf1f4a3101576d736c30e5c32795e157dc40c30e930ad74169ed42347,40765a29f642d16d1d1e7f65e389a48c59fa5d2cba4ec28d067234c29ede633b"
   },
   "durable_objects": {
     "bindings": [
