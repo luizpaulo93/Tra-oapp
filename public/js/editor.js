@@ -96,6 +96,7 @@ export class Editor {
       fit: "width",
       insetTop: 118,
       insetBottom: 56,
+      onView: () => this.viewChanged(),
       fingerDraw: () => (this.prefs.finger === null ? !this.penSeen : this.prefs.finger),
       onPen: () => { if (!this.penSeen) { this.penSeen = true; this.renderTools(); } },
     });
@@ -163,6 +164,7 @@ export class Editor {
     document.removeEventListener("paste", this.onPaste);
     document.removeEventListener("visibilitychange", this.onHide);
     clearInterval(this.liveTimer);
+    clearTimeout(this.viewTimer);
     await this.flushSaves();
     if (this.link) this.stopLive(true);
     this.board.destroy();
@@ -239,6 +241,7 @@ export class Editor {
     if (this.link) {
       if (!this.uploaded.has(p.id)) this.uploadPage(p);
       this.link.send({ t: "cur", id: p.id });
+      this.sendView();
     }
     this.trimPages();
   }
@@ -910,7 +913,11 @@ export class Editor {
     try { sessionStorage.setItem(LIVE_KEY, JSON.stringify({ code, key, nb: this.nb.id })); } catch {}
     link.onOpen = () => { if (!synced) { synced = true; this.syncAll(); } };
     link.onMessage = (m) => {
-      if (m.t === "viewers" || m.t === "ready") { this.viewers = m.t === "ready" ? m.viewers : m.n; this.updateLive(); }
+      if (m.t === "viewers" || m.t === "ready") {
+        this.viewers = m.t === "ready" ? m.viewers : m.n;
+        this.updateLive();
+        this.sendView(); // quem acabou de entrar recebe o enquadramento atual
+      }
     };
     link.onState = (s) => {
       this.updateLive();
@@ -970,6 +977,18 @@ export class Editor {
     this.link.send({ t: "op", pg }, JSON.stringify({ d, p }));
   }
 
+  // Quem assiste acompanha o zoom e a região que o apresentador está vendo.
+  viewChanged() {
+    if (!this.link || this.viewTimer) return;
+    this.viewTimer = setTimeout(() => { this.viewTimer = 0; this.sendView(); }, 90);
+  }
+
+  sendView() {
+    if (!this.link || !this.page) return;
+    const r = this.board.viewRect();
+    if (r) this.sendLive({ k: "vw", pg: this.page.id, r: r.map(ink.r1) });
+  }
+
   sendLive(body) {
     if (this.link) this.link.send({ t: "live" }, JSON.stringify(body));
   }
@@ -1023,6 +1042,7 @@ export class Editor {
     this.uploadPage(this.page);
     link.send({ t: "order", ids: this.nb.pages });
     link.send({ t: "cur", id: this.page.id });
+    this.sendView();
     this.pumpUploads();
   }
 

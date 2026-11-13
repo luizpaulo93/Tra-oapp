@@ -15,7 +15,9 @@ export class Viewer {
     this.order = [];
     this.cur = null; // página do apresentador
     this.showing = null; // página na tela
-    this.follow = true;
+    this.follow = true; // acompanha a página do apresentador
+    this.followView = true; // acompanha o zoom/região do apresentador
+    this.hostView = null; // { pg, r:[x0,y0,x1,y1] }
     this.hostOn = true;
 
     root.innerHTML = `
@@ -43,18 +45,22 @@ export class Viewer {
     this.elFollow = q('[data-a="follow"]');
     this.elMsg = q("[data-msg]");
     this.elLive = q(".v-live");
-    this.board = new Board(q(".stage"), { readonly: true, fit: "contain", insetTop: 58, insetBottom: 54 });
+    this.board = new Board(q(".stage"), {
+      readonly: true, fit: "contain", insetTop: 58, insetBottom: 54,
+      // se a pessoa mexer no zoom por conta própria, para de acompanhar
+      onView: (v, user) => { if (user && this.followView) { this.followView = false; this.updatePager(); } },
+    });
 
     q(".viewer").addEventListener("click", (e) => {
       const b = e.target.closest("[data-a]");
       if (!b || this.dead) return;
       const a = b.dataset.a;
       if (a === "exit") this.exit();
-      else if (a === "fit") this.board.fitView();
+      else if (a === "fit") { this.followView = false; this.board.fitView(); this.updatePager(); }
       else if (a === "full") this.fullscreen();
       else if (a === "prev") this.browse(-1);
       else if (a === "next") this.browse(1);
-      else if (a === "follow") { this.follow = true; this.show(this.cur); }
+      else if (a === "follow") { this.follow = true; this.followView = true; this.show(this.cur); }
     });
 
     const link = new ViewerLink(code);
@@ -64,11 +70,16 @@ export class Viewer {
     link.onEnded = () => this.ended();
     link.connect();
     this.status("connecting");
+    this.onResize = () => { clearTimeout(this.rsz); this.rsz = setTimeout(() => this.applyHostView(false), 180); };
+    window.addEventListener("resize", this.onResize);
   }
 
   destroy() {
     if (this.dead) return;
     this.dead = true;
+    window.removeEventListener("resize", this.onResize);
+    clearTimeout(this.rsz);
+    cancelAnimationFrame(this.anim);
     this.link.close();
     this.board.destroy();
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -120,6 +131,7 @@ export class Viewer {
         this.order = [];
         this.cur = null;
         this.showing = null;
+        this.hostView = null;
         this.board.setPage(null);
         this.updatePager();
         break;
@@ -198,6 +210,12 @@ export class Viewer {
   live(text) {
     let m;
     try { m = JSON.parse(text); } catch { return; }
+    if (m.k === "vw") { // enquadramento do apresentador
+      if (!Array.isArray(m.r) || m.r.length !== 4) return;
+      this.hostView = { pg: m.pg, r: m.r };
+      this.applyHostView(true);
+      return;
+    }
     if (m.pg && m.pg !== this.showing) return;
     const b = this.board;
     if (m.k === "sp") {
@@ -231,7 +249,29 @@ export class Viewer {
     this.showing = id;
     this.waiting(false);
     this.board.setPage(p, null, same);
+    this.applyHostView(false);
     this.updatePager();
+  }
+
+  // Enquadra nesta tela a mesma região que o apresentador está vendo.
+  applyHostView(animate) {
+    const hv = this.hostView;
+    if (this.dead || !this.followView || !hv || hv.pg !== this.showing) return;
+    const t = this.board.rectView(hv.r);
+    if (!t) return;
+    this.board.atFit = false;
+    if (!animate) { cancelAnimationFrame(this.anim); this.anim = 0; this.board.setView(t); return; }
+    this.target = t;
+    if (this.anim) return;
+    let n = 0;
+    const step = () => {
+      const b = this.board, v = b.view, g = this.target;
+      if (this.dead) return;
+      if (++n >= 8 || !this.followView) { this.anim = 0; if (this.followView) b.setView(g); return; }
+      b.setView({ s: v.s + (g.s - v.s) * 0.4, x: v.x + (g.x - v.x) * 0.4, y: v.y + (g.y - v.y) * 0.4 });
+      this.anim = requestAnimationFrame(step);
+    };
+    this.anim = requestAnimationFrame(step);
   }
 
   waiting(on) {
@@ -252,7 +292,7 @@ export class Viewer {
     const id = this.wanted || this.cur;
     const at = this.order.indexOf(id);
     this.elPage.textContent = this.order.length ? `${at + 1} de ${this.order.length}` : "";
-    this.elFollow.hidden = this.follow || !this.cur;
+    this.elFollow.hidden = (this.follow && this.followView) || !this.cur;
     this.root.querySelector('[data-a="prev"]').disabled = at <= 0;
     this.root.querySelector('[data-a="next"]').disabled = at < 0 || at >= this.order.length - 1;
   }

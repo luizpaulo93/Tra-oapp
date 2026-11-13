@@ -113,7 +113,7 @@ export class Board {
     this.view = { s, x: (this.W - this.page.w * s) / 2, y: this.insetTop + (ph < free ? (free - ph) / 2 : pad) };
     this.atFit = true;
     this.renderAll();
-    this.onView(this.view);
+    this.onView(this.view, false);
   }
 
   setView(v, user) {
@@ -129,7 +129,27 @@ export class Board {
     this.view = { s, x, y };
     if (user) this.atFit = false;
     this.requestViewRender();
-    this.onView(this.view);
+    this.onView(this.view, !!user);
+  }
+
+  // Região da página que está à vista (descontando as barras flutuantes).
+  viewRect() {
+    const p = this.page, v = this.view;
+    if (!p || !this.W) return null;
+    const x0 = Math.max(0, -v.x / v.s), x1 = Math.min(p.w, (this.W - v.x) / v.s);
+    const y0 = Math.max(0, (this.insetTop - v.y) / v.s), y1 = Math.min(p.h, (this.H - this.insetBottom - v.y) / v.s);
+    if (x1 - x0 < 1 || y1 - y0 < 1) return null;
+    return [x0, y0, x1, y1];
+  }
+
+  // Visão que enquadra uma região da página nesta tela.
+  rectView(r) {
+    if (!this.page || !this.W) return null;
+    const pad = 8;
+    const aw = this.W - pad * 2, ah = this.H - this.insetTop - this.insetBottom - pad * 2;
+    const rw = Math.max(20, r[2] - r[0]), rh = Math.max(20, r[3] - r[1]);
+    const s = Math.min(aw / rw, ah / rh);
+    return { s, x: pad + (aw - rw * s) / 2 - r[0] * s, y: this.insetTop + pad + (ah - rh * s) / 2 - r[1] * s };
   }
 
   zoomAt(cx, cy, factor) {
