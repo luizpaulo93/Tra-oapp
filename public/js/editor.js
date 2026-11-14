@@ -4,7 +4,7 @@
 import { Board } from "./board.js";
 import * as ink from "./ink.js";
 import * as store from "./store.js";
-import { api, HostLink } from "./net.js";
+import { api, HostLink, BulkSender } from "./net.js";
 import { readPdf, readImage, exportPdf, download, pageAssets } from "./pdfio.js";
 import { h, esc, icon, toast, modal, confirmBox, popover, sleep, formatCode, toggleFullscreen, NO_FULLSCREEN } from "./ui.js";
 import { qrSvg } from "./qr.js";
@@ -12,6 +12,19 @@ import { qrSvg } from "./qr.js";
 const PEN_COLORS = ["#14213d", "#2347d9", "#e5383b", "#1e9e61", "#f08c00", "#7c3aed"];
 const HL_COLORS = ["#ffe14d", "#9bec8a", "#ffa6c9", "#8fd3ff", "#ffc06a"];
 const LIVE_KEY = "traco.live";
+// Transmissão em conexão lenta:
+const DIRECT_MAX = 24 * 1024; // acima disso, o envio vai em pedaços, sem travar a escrita
+const LIVE_MAX = 12 * 1024; // fila de saída acima disso: pula o envio "ao vivo" da vez
+// Etapas leves da imagem de uma página: tenta cada (largura, qualidade) até
+// caber no limite de tamanho, para chegar rápido mesmo em conexão bem lenta.
+const PREVIEW_MAX = 30 * 1024; // prévia: aparece na hora
+const PREVIEW_STEPS = [[480, 0.5], [400, 0.4], [320, 0.34], [260, 0.3]];
+const PREVIEW_SKIP = 36 * 1024; // imagem até esse tamanho dispensa prévia
+const MEDIUM_MAX = 170 * 1024; // qualidade média: já boa para ler
+const MEDIUM_STEPS = [[1000, 0.7], [1000, 0.5], [860, 0.45], [720, 0.4]];
+const MSG_MAX = 1400 * 1024; // maior imagem que uma mensagem leva; acima disso, é reduzida
+const BIG_STEPS = [[2200, 0.85], [1800, 0.82], [1500, 0.8], [1200, 0.75]];
+const MEDIUM_MIN = 260 * 1024; // imagem menor que isso dispensa a etapa média
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 
 const TOOLS = [
@@ -53,7 +66,11 @@ export class Editor {
     this.act = null;
     this.link = null;
     this.viewers = 0;
-    this.uploaded = new Set();
+    this.uploaded = new Set(); // páginas que quem assiste já conhece
+    this.fulls = new Set(); // páginas com a imagem completa enviada ou na fila
+    this.previews = new Map(); // prévia leve da imagem de cada página
+    this.pendingIds = new Map(); // itens pesados ainda a caminho
+    this.lastDraw = 0;
     // Já se usou caneta neste aparelho? (liga a rejeição de palma desde o início)
     this.penSeen = false;
     try { this.penSeen = localStorage.getItem("traco.pen") === "1"; } catch {}
@@ -290,9 +307,12 @@ export class Editor {
     this.board.setPage(p, this.nb.paper);
     this.updatePager();
     if (this.link) {
-      if (!this.uploaded.has(p.id)) this.uploadPage(p);
-      this.link.send({ t: "cur", id: p.id });
-      this.sendView();
+      if (this.bulk) this.bulk.sort(); // a página aberta passa na frente
+      if (!this.uploaded.has(p.id)) await this.uploadPage(p, true);
+      if (this.link && this.page === p) {
+        this.link.send({ t: "cur", id: p.id });
+        this.sendView();
+      }
     }
     this.trimPages();
   }
@@ -321,7 +341,6 @@ export class Editor {
     await this.saveNb();
     if (this.link) {
       this.link.send({ t: "order", ids: this.nb.pages });
-      this.pumpUploads();
     }
     if (!quiet) this.updatePager();
     this.trimPages();
@@ -343,6 +362,7 @@ export class Editor {
       this.link.send({ t: "delpage", id });
       this.link.send({ t: "order", ids: this.nb.pages });
       this.uploaded.delete(id);
+      this.fulls.delete(id);
     }
     if (i < this.index) { this.index--; this.updatePager(); }
     else if (i === this.index) await this.go(Math.min(i, this.nb.pages.length - 1), true);
@@ -635,12 +655,13 @@ export class Editor {
     if (!a) return;
     clearInterval(this.liveTimer);
     this.act = null;
+    this.lastDraw = performance.now();
     if (a.tool === "pen" || a.tool === "hl" || a.tool === "shape") {
       const empty = a.tool === "shape" && a.s.p.length < 6;
       if (cancel || empty) {
         this.board.liveStrokes.delete(a.s.id);
         this.board.invalidateLive();
-        this.sendLive({ k: "sx", id: a.s.id });
+        this.sendLive({ k: "sx", id: a.s.id }, true);
       } else {
         if (a.tool !== "shape" && Math.hypot(a.rx - a.lx, a.ry - a.ly) > 0.3 / this.board.view.s) {
           a.s.p.push(ink.r1(a.rx), ink.r1(a.ry), a.tool === "pen" ? Math.round(a.pr * 100) / 100 : 0.5);
@@ -986,8 +1007,32 @@ export class Editor {
     this.viewers = 0;
     let synced = false;
     try { sessionStorage.setItem(LIVE_KEY, JSON.stringify({ code, key, nb: this.nb.id })); } catch {}
-    link.onOpen = () => { if (!synced) { synced = true; this.syncAll(); } };
+    // envio de conteúdo pesado, que cede a vez para a escrita
+    // Prioridades (menor = primeiro):
+    //  0 = traços, fotos e prévia da página aberta;
+    //  1 = o essencial das páginas vizinhas (virar a página fica imediato);
+    //  2 = imagem da página aberta em qualidade média;
+    //  3 = o essencial das demais páginas;
+    //  4 = imagem da página aberta em qualidade total;
+    //  5 e 6 = imagens das outras páginas (média e total).
+    const pri = (job) => {
+      const cur = !!this.page && job.pg === this.page.id;
+      if (job.cls === "full") return cur ? 4 : 6;
+      if (job.cls === "med") return cur ? 2 : 5;
+      if (cur) return 0;
+      return Math.abs(this.nb.pages.indexOf(job.pg) - this.index) === 1 ? 1 : 3;
+    };
+    const bulk = new BulkSender(link, () => !!this.act || performance.now() - this.lastDraw < 400, pri);
+    this.bulk = bulk;
+    clearInterval(this.pumpTimer);
+    this.pumpTimer = setInterval(() => this.pumpTick(), 400);
+    link.onOpen = () => {
+      if (!synced) { synced = true; this.syncAll(); }
+      else bulk.restart(); // reconectou: o que estava a caminho recomeça
+    };
     link.onMessage = (m) => {
+      if (m.t === "pa") { bulk.partAck(m.mid, m.n); return; }
+      if (m.t === "partok" || m.t === "partfail") { bulk.ack(m.mid, m.t === "partok"); return; }
       if (m.t === "viewers" || m.t === "ready") {
         this.viewers = m.t === "ready" ? m.viewers : m.n;
         this.updateLive();
@@ -1008,6 +1053,10 @@ export class Editor {
     if (!link) return;
     this.link = null;
     if (already) link.close(); else link.end();
+    clearInterval(this.pumpTimer);
+    if (this.bulk) { this.bulk.stop(); this.bulk = null; }
+    this.pendingIds.clear();
+    this.fulls = new Set();
     try { sessionStorage.removeItem(LIVE_KEY); } catch {}
     this.uploaded = new Set();
     this.updateLive();
@@ -1083,9 +1132,33 @@ export class Editor {
     el.focus();
   }
 
+  // Alteração definitiva em uma página. Traços vão direto. O que é pesado
+  // (uma foto, por exemplo) vai pela fila dosada; e qualquer alteração em um
+  // item que ainda está a caminho entra na fila atrás dele, para não chegar antes.
   sendOp(pg, d, p) {
-    if (!this.link || !this.uploaded.has(pg)) return;
-    this.link.send({ t: "op", pg }, JSON.stringify({ d, p }));
+    const link = this.link;
+    if (!link || !this.uploaded.has(pg)) return;
+    const body = JSON.stringify({ d, p });
+    const waits = this.pendingIds.size && (d.some((id) => this.pendingIds.has(id)) || p.some((it) => this.pendingIds.has(it.id)));
+    if (body.length <= DIRECT_MAX && !waits) { link.send({ t: "op", pg }, body); return; }
+    this.bulk.add(this.bulkOp(pg, body, [...d, ...p.map((it) => it.id)]));
+  }
+
+  // Cria um item da fila dosada com uma alteração de página.
+  bulkOp(pg, body, ids) {
+    for (const id of ids) this.pendingIds.set(id, (this.pendingIds.get(id) || 0) + 1);
+    return {
+      key: "op:" + pg,
+      cls: "op",
+      pg,
+      make: async () => [{ t: "op", pg }, body],
+      done: () => {
+        for (const id of ids) {
+          const n = (this.pendingIds.get(id) || 1) - 1;
+          if (n > 0) this.pendingIds.set(id, n); else this.pendingIds.delete(id);
+        }
+      },
+    };
   }
 
   // Quem assiste acompanha o zoom e a região que o apresentador está vendo.
@@ -1097,11 +1170,18 @@ export class Editor {
   sendView() {
     if (!this.link || !this.page) return;
     const r = this.board.viewRect();
-    if (r) this.sendLive({ k: "vw", pg: this.page.id, r: r.map(ink.r1) });
+    if (r && !this.sendLive({ k: "vw", pg: this.page.id, r: r.map(ink.r1) })) this.viewChanged(); // tenta de novo já
   }
 
-  sendLive(body) {
-    if (this.link) this.link.send({ t: "live" }, JSON.stringify(body));
+  // Dados "ao vivo" (traço em andamento, laser, enquadramento). Se a conexão
+  // está congestionada, não empilha: pula este envio e o próximo leva tudo de
+  // uma vez. Assim o atraso nunca cresce. Devolve se enviou.
+  sendLive(body, force) {
+    const link = this.link;
+    if (!link || !link.isOpen) return false;
+    if (!force && link.buffered() > LIVE_MAX) return false;
+    link.send({ t: "live" }, JSON.stringify(body));
+    return true;
   }
 
   liveTick() {
@@ -1113,73 +1193,159 @@ export class Editor {
     if (!this.link) return;
     if (a.tool === "pen" || a.tool === "hl") {
       const n = a.s.p.length / 3;
-      if (n > a.sent) {
-        this.sendLive({ k: "sp", pg: a.pg, id: a.s.id, t: a.s.t, c: a.s.c, w: a.s.w, p: a.s.p.slice(a.sent * 3) });
-        a.sent = n;
-      }
+      if (n > a.sent && this.sendLive({ k: "sp", pg: a.pg, id: a.s.id, t: a.s.t, c: a.s.c, w: a.s.w, p: a.s.p.slice(a.sent * 3) })) a.sent = n;
     } else if (a.tool === "shape" && a.changed) {
-      a.changed = false;
-      this.sendLive({ k: "sp", pg: a.pg, id: a.s.id, t: "pen", c: a.s.c, w: a.s.w, r: 1, g: 1, d: a.s.d, dn: a.s.dn, p: a.s.p });
+      if (this.sendLive({ k: "sp", pg: a.pg, id: a.s.id, t: "pen", c: a.s.c, w: a.s.w, r: 1, g: 1, d: a.s.d, dn: a.s.dn, p: a.s.p })) a.changed = false;
     } else if (a.tool === "laser" && a.pend.length) {
-      this.sendLive({ k: "lz", pg: a.pg, n: a.first ? 1 : 0, p: a.pend });
-      a.pend = [];
-      a.first = false;
+      if (this.sendLive({ k: "lz", pg: a.pg, n: a.first ? 1 : 0, p: a.pend })) { a.pend = []; a.first = false; }
+      else if (a.pend.length > 400) a.pend = a.pend.slice(-400);
     }
   }
 
-  uploadPage(p) {
+  // Imagem de uma página reduzida até caber em um tamanho (para as etapas leves).
+  async scaled(bg, steps, max) {
+    const img = await ink.loadImage(bg).promise;
+    if (!img) return "";
+    const c = document.createElement("canvas");
+    let out = "";
+    for (const [width, quality] of steps) {
+      const k = Math.min(1, width / img.naturalWidth);
+      c.width = Math.max(1, Math.round(img.naturalWidth * k));
+      c.height = Math.max(1, Math.round(img.naturalHeight * k));
+      const x = c.getContext("2d");
+      x.fillStyle = "#fff";
+      x.fillRect(0, 0, c.width, c.height);
+      x.drawImage(img, 0, 0, c.width, c.height);
+      out = c.toDataURL("image/jpeg", quality);
+      if (out.length <= max) break;
+    }
+    c.width = c.height = 0;
+    return out;
+  }
+
+  // Prévia leve da imagem de uma página (aparece na hora para quem assiste).
+  async preview(p) {
+    const have = this.previews.get(p.id);
+    if (have !== undefined) return have;
+    const bg = p.bg || (await store.getBg(p.id));
+    let pv = "";
+    if (bg) {
+      if (bg.length <= PREVIEW_SKIP) { pv = bg; this.fulls.add(p.id); } // já é leve: vai inteira
+      else pv = await this.scaled(bg, PREVIEW_STEPS, PREVIEW_MAX);
+    }
+    this.previews.set(p.id, pv);
+    return pv;
+  }
+
+  // Apresenta uma página a quem assiste, em etapas:
+  //  1. o essencial — tamanho, prévia leve da imagem e os traços — chega rápido;
+  //  2. a imagem em qualidade média, já boa para ler, logo em seguida;
+  //  3. a imagem em qualidade total, por último.
+  // As etapas 2 e 3 (e fotos) vão pela fila dosada, sem travar a escrita.
+  //  - now = true (página aberta agora): a etapa 1 vai direto;
+  //  - now = false (segundo plano): tudo vai pela fila dosada.
+  async uploadPage(p, now) {
     const link = this.link;
+    if (!link) return;
     this.uploaded.add(p.id);
-    link.send({ t: "page", id: p.id, w: p.w, h: p.h }, p.bg || "");
-    let parts = [], size = 0;
+    const hasBg = !!(p.hasBg || p.bg);
+    let pv = "";
+    if (hasBg) { try { pv = await this.preview(p); } catch {} }
+    if (this.link !== link) return;
+    const id = p.id;
+    const jobs = [];
+    const head = { t: "page", id, w: p.w, h: p.h };
+    if (now) link.send(head, pv);
+    else jobs.push({ key: "pg:" + id, cls: "pg", pg: id, make: async () => [head, pv] });
+
+    // traços em lotes pequenos; fotos (pesadas), uma a uma
+    let parts = [], ids = [], size = 0, first = true;
     const flush = () => {
-      if (parts.length) link.send({ t: "op", pg: p.id }, '{"p":[' + parts.join(",") + "]}");
-      parts = []; size = 0;
+      if (!parts.length) return;
+      const body = '{"p":[' + parts.join(",") + "]}";
+      if (now && first && body.length <= DIRECT_MAX) link.send({ t: "op", pg: id }, body);
+      else jobs.push(this.bulkOp(id, body, ids));
+      parts = []; ids = []; size = 0; first = false;
     };
     for (const it of p.items) {
       const s = JSON.stringify(it);
-      if (size + s.length > 300000) flush();
-      parts.push(s);
-      size += s.length;
+      if (it.k === "i") { flush(); first = false; jobs.push(this.bulkOp(id, `{"p":[${s}]}`, [it.id])); continue; }
+      if (size + s.length > DIRECT_MAX) flush();
+      parts.push(s); ids.push(it.id); size += s.length;
     }
     flush();
+
+    // imagem em qualidade média e total (se a prévia já não for a própria imagem)
+    if (hasBg && pv && !this.fulls.has(id)) {
+      this.fulls.add(id);
+      const load = async () => {
+        const pg = this.nb.pages.includes(id) ? await this.loadPage(id) : null;
+        return (pg && pg.bg) || "";
+      };
+      jobs.push({
+        key: "md:" + id, cls: "med", pg: id,
+        make: async () => {
+          const bg = await load();
+          // conexão rápida ou imagem pequena: vai direto para a qualidade total
+          if (!bg || bg.length < MEDIUM_MIN || (this.bulk.fast() && bg.length <= MSG_MAX)) { this.trimPages(); return null; }
+          const m = await this.scaled(bg, MEDIUM_STEPS, MEDIUM_MAX);
+          this.trimPages();
+          return m && m.length < bg.length * 0.7 ? [{ t: "bg", id, q: "m" }, m] : null;
+        },
+      });
+      jobs.push({
+        key: "bg:" + id, cls: "full", pg: id,
+        make: async () => {
+          let bg = await load();
+          if (bg.length > MSG_MAX) bg = await this.scaled(bg, BIG_STEPS, MSG_MAX); // grande demais para uma mensagem
+          this.trimPages();
+          return bg && bg.length <= MSG_MAX ? [{ t: "bg", id, q: "f" }, bg] : null;
+        },
+      });
+    }
+    this.bulk.add(jobs);
   }
 
   async syncAll() {
     const link = this.link;
     if (!link) return;
     this.uploaded = new Set();
+    this.fulls = new Set();
+    this.pendingIds.clear();
+    this.bulk.clear();
     link.send({ t: "reset" });
-    this.uploadPage(this.page);
     link.send({ t: "order", ids: this.nb.pages });
+    const p = this.page;
+    await this.uploadPage(p, true);
+    if (this.link !== link) return;
     link.send({ t: "cur", id: this.page.id });
     this.sendView();
-    this.pumpUploads();
   }
 
-  // Envia em segundo plano as páginas que os espectadores ainda não têm.
-  async pumpUploads() {
-    if (this.pumping) { this.pumpAgain = true; return; }
-    this.pumping = true;
-    try {
-      do {
-        this.pumpAgain = false;
-        for (const id of [...this.nb.pages]) {
-          const link = this.link;
-          if (!link || link.closed) return;
-          if (this.uploaded.has(id)) continue;
-          while (link.buffered() > 1_500_000) await sleep(60);
-          const had = this.pages.get(id);
-          const hadBg = had && had.bg;
-          const p = await this.loadPage(id);
-          if (!p || this.link !== link || this.uploaded.has(id) || !this.nb.pages.includes(id)) continue;
-          this.uploadPage(p);
-          if (!hadBg) this.trimPages();
-          await sleep(20);
-        }
-      } while (this.pumpAgain);
-    } finally {
-      this.pumping = false;
+  // Em segundo plano, apresenta as outras páginas (as mais próximas da atual
+  // primeiro), uma por vez e sem ninguém escrevendo. As vizinhas vão logo
+  // depois do essencial da página aberta; as demais, depois da imagem dela em
+  // qualidade média. Assim, ao virar a página, ela já está pronta para quem assiste.
+  pumpTick() {
+    const link = this.link;
+    if (!link || !link.isOpen || !this.bulk || this.pumping || !this.page) return;
+    if (this.act || performance.now() - this.lastDraw < 400) return;
+    // a fila dosada é o freio: uma página por vez
+    if (this.bulk.has((j) => j.cls !== "full" && j.cls !== "med")) return;
+    const ids = this.nb.pages;
+    let id = null;
+    for (let k = 1; k < ids.length && !id; k++) {
+      for (const i of [this.index + k, this.index - k]) {
+        if (i >= 0 && i < ids.length && !this.uploaded.has(ids[i])) { id = ids[i]; break; }
+      }
     }
+    if (!id) return;
+    // página distante: espera a imagem da página aberta ficar boa para ler
+    if (Math.abs(ids.indexOf(id) - this.index) > 1 && this.bulk.has((j) => j.cls === "med" && j.pg === this.page.id)) return;
+    this.pumping = true;
+    this.loadPage(id)
+      .then((p) => (p && this.link === link && !this.uploaded.has(id) && this.nb.pages.includes(id) ? this.uploadPage(p, false) : null))
+      .catch(() => {})
+      .then(() => { this.pumping = false; this.trimPages(); });
   }
 }

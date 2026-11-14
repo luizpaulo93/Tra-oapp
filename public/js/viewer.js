@@ -19,6 +19,12 @@ export class Viewer {
     this.followView = true; // acompanha o zoom/região do apresentador
     this.hostView = null; // { pg, r:[x0,y0,x1,y1] }
     this.hostOn = true;
+    // Imagens de página em qualidade total: chegam aos poucos, depois da
+    // prévia leve, e ficam guardadas (uma queda de conexão não as baixa de novo).
+    this.imgCache = new Map(); // id -> { q: "m" (média) | "f" (total), bg }
+    this.partial = new Map(); // "q:id" -> { total, parts, got } (download em andamento)
+    this.dlBusy = null;
+    this.lastLive = 0;
 
     root.innerHTML = `
       <div class="viewer">
@@ -83,6 +89,7 @@ export class Viewer {
     this.dead = true;
     window.removeEventListener("resize", this.onResize);
     clearTimeout(this.rsz);
+    clearTimeout(this.dlTimer);
     cancelAnimationFrame(this.anim);
     this.link.close();
     this.board.destroy();
@@ -118,8 +125,9 @@ export class Viewer {
 
   message(m, body) {
     switch (m.t) {
-      case "hello": // (re)conexão: recomeça do zero
+      case "hello": // (re)conexão: recomeça do zero (as imagens já baixadas ficam)
         this.pages.clear();
+        this.dlBusy = null;
         this.order = m.order || [];
         for (const p of m.pages || []) Object.assign(this.meta(p.id), { w: p.w, h: p.h });
         this.cur = m.cur;
@@ -164,11 +172,36 @@ export class Viewer {
         break;
       case "pagedata": {
         const p = this.meta(m.id);
+        // imagem melhor que a prévia, já baixada antes (vale se ainda for a mesma)
+        let have = this.imgCache.get(m.id);
+        if (have && ((have.q === "f" && m.full && have.bg.length !== m.full) || (have.q === "m" && m.med && have.bg.length !== m.med))) {
+          this.imgCache.delete(m.id);
+          have = null;
+        }
+        if (m.nobg && !have) { // a imagem guardada não serve mais: pede a página inteira
+          p.state = "req";
+          this.link.get(m.id);
+          break;
+        }
         p.w = m.w; p.h = m.h; p.items = []; p.state = "ok";
-        delete p.bgImg;
-        if (body) p.bg = body; else delete p.bg;
+        p.med = m.med || 0;
+        p.full = m.full || 0;
+        const bg = have ? have.bg : body || undefined;
+        if (p.bg !== bg) { p.bg = bg; delete p.bgImg; }
         break;
       }
+      case "bg": { // uma versão melhor da imagem ficou disponível
+        const p = this.pages.get(m.id);
+        if (p) {
+          if (m.q === "m") p.med = m.total || 0;
+          else { p.full = m.total || 0; p.med = 0; }
+        }
+        if (this.showing === m.id) this.pumpFull();
+        break;
+      }
+      case "bgpart":
+        this.gotPart(m, body);
+        break;
       case "ops": {
         const p = this.pages.get(m.pg);
         if (!p || p.state !== "ok") break;
@@ -197,6 +230,7 @@ export class Viewer {
         break;
       }
       case "live":
+        this.lastLive = performance.now();
         this.live(body);
         break;
     }
@@ -246,7 +280,7 @@ export class Viewer {
     if (!id) { this.board.setPage(null); this.showing = null; this.updatePager(); this.waiting(true); return; }
     const p = this.meta(id);
     if (p.state === "ok") { this.display(id); return; }
-    if (p.state === "none" || again) { p.state = "req"; this.link.get(id); }
+    if (p.state === "none" || again) { p.state = "req"; this.link.get(id, this.imgCache.has(id)); }
     this.waiting(true);
     this.updatePager();
   }
@@ -260,6 +294,92 @@ export class Viewer {
     this.board.setPage(p, null, same);
     this.applyHostView(false);
     this.updatePager();
+    this.pumpFull();
+  }
+
+  // Busca, aos poucos, uma versão melhor da imagem da página que está na tela:
+  // primeiro a de qualidade média (já boa para ler), depois a total.
+  // Um pedaço por vez: os traços ao vivo passam entre um pedaço e outro, e
+  // enquanto o apresentador escreve os pedaços são menores e mais espaçados.
+  pumpFull() {
+    clearTimeout(this.dlTimer);
+    if (this.dead || this.dlBusy) return;
+    const id = this.showing;
+    const p = id && this.pages.get(id);
+    if (!p || p.state !== "ok") return;
+    const have = this.imgCache.get(id);
+    let q = null;
+    if (!have && p.med) q = "m";
+    else if (p.full && (!have || have.q !== "f")) q = "f";
+    if (!q) return;
+    const total = q === "m" ? p.med : p.full;
+    const key = q + ":" + id;
+    let st = this.partial.get(key);
+    if (!st || st.total !== total) {
+      st = { total, parts: [], got: 0 };
+      if (this.partial.size >= 3) this.partial.delete(this.partial.keys().next().value);
+      this.partial.set(key, st);
+    }
+    // cada pedaço deve levar ~0,4 s nesta conexão (menos ainda durante a escrita),
+    // para não segurar os traços ao vivo nem a troca de página
+    const writing = performance.now() - this.lastLive < 500;
+    const fit = this.dlRate ? this.dlRate * (writing ? 0.25 : 0.4) : 8192;
+    const n = Math.max(4096, Math.min(writing ? 8192 : 32768, Math.round(fit)));
+    if (this.link.getBg(id, q, st.got, n)) {
+      this.dlBusy = key;
+      this.dlAt = performance.now();
+      // se a resposta não vier (conexão ruim), tenta de novo
+      this.dlTimer = setTimeout(() => { if (this.dlBusy === key) { this.dlBusy = null; this.pumpFull(); } }, 15000);
+    }
+  }
+
+  gotPart(m, body) {
+    const key = (m.q === "m" ? "m" : "f") + ":" + m.id;
+    if (this.dlBusy !== key) return;
+    this.dlBusy = null;
+    if (body.length >= 2048) { // velocidade de recebimento medida (bytes/s)
+      const r = body.length / (Math.max(20, performance.now() - this.dlAt) / 1000);
+      this.dlRate = this.dlRate ? this.dlRate * 0.6 + r * 0.4 : r;
+    }
+    const st = this.partial.get(key);
+    if (st && m.total === st.total && m.o === st.got && body.length) {
+      st.parts.push(body);
+      st.got += body.length;
+      if (st.got >= st.total) {
+        this.partial.delete(key);
+        this.useImage(m.id, m.q === "m" ? "m" : "f", st.parts.join(""));
+      }
+    } else if (st && (m.total !== st.total || !body.length)) {
+      this.partial.delete(key); // a imagem mudou no servidor: recomeça
+      const p = this.pages.get(m.id);
+      if (p) { if (m.q === "m") p.med = m.total || 0; else p.full = m.total || 0; }
+    }
+    clearTimeout(this.dlTimer);
+    this.dlTimer = setTimeout(() => this.pumpFull(), performance.now() - this.lastLive < 500 ? 200 : 0);
+  }
+
+  // Uma versão melhor da imagem chegou: guarda e troca na tela, sem piscar.
+  useImage(id, q, bg) {
+    const old = this.imgCache.get(id);
+    if (old && old.q === "f" && q === "m") return;
+    this.imgCache.delete(id);
+    this.imgCache.set(id, { q, bg });
+    let size = 0;
+    for (const v of this.imgCache.values()) size += v.bg.length;
+    for (const k of [...this.imgCache.keys()]) { // limite de memória
+      if (size <= 24_000_000 || k === id) break;
+      size -= this.imgCache.get(k).bg.length;
+      this.imgCache.delete(k);
+    }
+    ink.loadImage(bg).promise.then((im) => {
+      const p = this.pages.get(id);
+      if (!im || !p || this.dead) return;
+      const now = this.imgCache.get(id);
+      if (now && now.bg !== bg) return; // já chegou uma versão melhor
+      p.bg = bg;
+      p.bgImg = im;
+      if (this.showing === id) this.board.renderBg();
+    });
   }
 
   // Enquadra nesta tela a mesma região que o apresentador está vendo.

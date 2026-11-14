@@ -9,6 +9,8 @@ const HOST_GRACE_MS = 3 * 60 * 1000; // tempo para o apresentador reconectar
 const MAX_LIFE_MS = 12 * 60 * 60 * 1000; // duração máxima de uma transmissão
 const MAX_MSG = 1_500_000; // tamanho máximo de uma mensagem
 const CHUNK = 256 * 1024; // tamanho dos blocos enviados a quem entra depois
+const PART_MSGS = 8; // mensagens grandes que podem estar chegando em pedaços ao mesmo tempo
+const BG_CHUNK = 32 * 1024; // pedaço de imagem entregue a cada pedido do espectador
 
 function head(obj, body) {
   return body === undefined ? JSON.stringify(obj) + "\n" : JSON.stringify(obj) + "\n" + body;
@@ -30,6 +32,38 @@ export class RoomCore {
 
   get sql() {
     return this.ctx.storage.sql;
+  }
+
+  // Tabela de apoio para conexões lentas — fulls: imagem da página em qualidade
+  // média ("m:id") e total ("id"). A tabela `pages` guarda só uma prévia leve,
+  // que aparece na hora para quem assiste.
+  ensureExtra() {
+    if (this.extra) return;
+    this.sql.exec("CREATE TABLE IF NOT EXISTS fulls (id TEXT PRIMARY KEY, bg TEXT)");
+    this.extra = true;
+  }
+
+  // Pedaços de uma mensagem grande do apresentador, que chega aos poucos para
+  // não travar os traços ao vivo. Ficam só na memória (sem gastar gravações no
+  // banco); se algo se perder, o apresentador é avisado e reenvia.
+  // Devolve a mensagem inteira (chegou o último pedaço), undefined (ainda
+  // faltam pedaços) ou null (perdeu-se algum: precisa reenviar).
+  takePart(mid, n, body, last) {
+    const all = this.partBuf || (this.partBuf = new Map());
+    let m = all.get(mid);
+    if (!m) {
+      if (n !== 0) return null; // o começo se perdeu
+      while (all.size >= PART_MSGS) all.delete(all.keys().next().value);
+      m = { list: [], size: 0 };
+      all.set(mid, m);
+    }
+    if (n < m.list.length) return undefined; // repetido
+    if (n > m.list.length || m.size + body.length > MAX_MSG + 4096) { all.delete(mid); return null; }
+    m.list.push(body);
+    m.size += body.length;
+    if (!last) return undefined;
+    all.delete(mid);
+    return m.list.join("");
   }
 
   async load() {
@@ -112,11 +146,37 @@ export class RoomCore {
     const role = (ws.deserializeAttachment() || {}).role;
 
     if (role !== "host") {
-      if (h.t === "get" && typeof h.id === "string") this.sendPage(ws, h.id);
+      if (typeof h.id !== "string") return;
+      if (h.t === "get") this.sendPage(ws, h.id, !!h.nobg);
+      else if (h.t === "getbg") this.sendBg(ws, h.id, h.q, h.o, h.n);
       return;
     }
 
     switch (h.t) {
+      case "part": { // pedaço de uma mensagem grande
+        if (typeof h.mid !== "string" || h.mid.length > 40 || !Number.isInteger(h.n) || h.n < 0 || h.n > 4000) return;
+        const whole = this.takePart(h.mid, h.n, body, !!h.last);
+        // confirma o recebimento: é por essas confirmações que o apresentador
+        // mede a velocidade da conexão e dosa o envio
+        ws.send(head({ t: "pa", mid: h.mid, n: h.n }));
+        if (whole === undefined) return;
+        if (whole === null) { ws.send(head({ t: "partfail", mid: h.mid })); return; } // faltou pedaço: reenviar
+        await this.message(ws, whole);
+        ws.send(head({ t: "partok", mid: h.mid }));
+        break;
+      }
+      case "partdrop": // o apresentador reconectou: descarta envios pela metade
+        this.partBuf = null;
+        break;
+      case "bg": { // imagem da página: q "m" = qualidade média (chega logo), "f" = total
+        if (typeof h.id !== "string") return;
+        this.ensureExtra();
+        const q = h.q === "m" ? "m" : "f";
+        this.sql.exec("INSERT OR REPLACE INTO fulls (id, bg) VALUES (?, ?)", (q === "m" ? "m:" : "") + h.id, body);
+        if (q === "f") this.sql.exec("DELETE FROM fulls WHERE id = ?", "m:" + h.id); // a média não é mais necessária
+        this.toViewers(head({ t: "bg", id: h.id, q, total: body.length }));
+        break;
+      }
       case "live": // traço em andamento, laser: só retransmite
         this.toViewers(raw);
         break;
@@ -125,7 +185,7 @@ export class RoomCore {
         this.sql.exec("INSERT INTO ops (pg, body) VALUES (?, ?)", h.pg, body);
         this.toViewers(raw);
         break;
-      case "page": // nova página (o corpo é a imagem de fundo, se houver)
+      case "page": // nova página (o corpo é uma prévia leve da imagem de fundo, se houver)
         if (typeof h.id !== "string") return;
         this.sql.exec(
           "INSERT OR REPLACE INTO pages (id, w, h, bg) VALUES (?, ?, ?, ?)",
@@ -146,13 +206,18 @@ export class RoomCore {
         break;
       case "delpage":
         if (typeof h.id !== "string") return;
+        this.ensureExtra();
         this.sql.exec("DELETE FROM pages WHERE id = ?", h.id);
         this.sql.exec("DELETE FROM ops WHERE pg = ?", h.id);
+        this.sql.exec("DELETE FROM fulls WHERE id = ? OR id = ?", h.id, "m:" + h.id);
         this.toViewers(head({ t: "delpage", id: h.id }));
         break;
       case "reset":
+        this.ensureExtra();
         this.sql.exec("DELETE FROM pages");
         this.sql.exec("DELETE FROM ops");
+        this.sql.exec("DELETE FROM fulls");
+        this.partBuf = null;
         room.order = [];
         room.cur = null;
         await this.save();
@@ -215,15 +280,23 @@ export class RoomCore {
     }
   }
 
-  // Envia a um espectador tudo o que já existe em uma página.
-  sendPage(ws, id) {
+  // Envia a um espectador tudo o que já existe em uma página. A imagem vai
+  // como prévia leve, que aparece na hora; `med` e `full` dizem o tamanho das
+  // versões em qualidade média e total, que o espectador busca aos poucos
+  // (sendBg). Com `nobg`, ele já tem uma imagem melhor guardada.
+  sendPage(ws, id, nobg) {
     const rows = this.sql.exec("SELECT id, w, h, bg FROM pages WHERE id = ?", id).toArray();
     if (!rows.length) {
       ws.send(head({ t: "nopage", id }));
       return;
     }
+    this.ensureExtra();
     const p = rows[0];
-    ws.send(head({ t: "pagedata", id, w: p.w, h: p.h }, p.bg || ""));
+    const len = (key) => {
+      const r = this.sql.exec("SELECT length(bg) AS n FROM fulls WHERE id = ?", key).toArray()[0];
+      return r ? Number(r.n) : 0;
+    };
+    ws.send(head({ t: "pagedata", id, w: p.w, h: p.h, med: len("m:" + id), full: len(id), nobg: nobg ? 1 : 0 }, nobg ? "" : p.bg || ""));
     let buf = [];
     let size = 0;
     for (const row of this.sql.exec("SELECT body FROM ops WHERE pg = ? ORDER BY seq", id)) {
@@ -239,6 +312,17 @@ export class RoomCore {
     ws.send(head({ t: "pageend", id }));
   }
 
+  // Um pedaço da imagem (média ou total). O espectador pede um por vez, no
+  // ritmo da conexão dele, e os traços ao vivo passam entre um pedaço e outro.
+  sendBg(ws, id, q, o, n) {
+    this.ensureExtra();
+    q = q === "m" ? "m" : "f";
+    o = Math.max(0, Math.floor(+o || 0));
+    n = Math.min(BG_CHUNK, Math.max(4096, Math.floor(+n || BG_CHUNK))); // pedaços menores, se pedido
+    const r = this.sql.exec("SELECT length(bg) AS n, substr(bg, ?, ?) AS part FROM fulls WHERE id = ?", o + 1, n, (q === "m" ? "m:" : "") + id).toArray()[0];
+    ws.send(head({ t: "bgpart", id, q, o, total: r ? Number(r.n) : 0 }, r ? r.part : ""));
+  }
+
   async end() {
     const msg = head({ t: "ended" });
     for (const s of this.ctx.getWebSockets()) {
@@ -246,6 +330,8 @@ export class RoomCore {
       try { s.close(4004, "ended"); } catch {}
     }
     this.room = null;
+    this.extra = false;
+    this.partBuf = null;
     try { await this.ctx.storage.deleteAlarm(); } catch {}
     await this.ctx.storage.deleteAll();
   }
