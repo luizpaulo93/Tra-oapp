@@ -10,6 +10,9 @@ const MAX_LIFE_MS = 12 * 60 * 60 * 1000; // duração máxima de uma transmissã
 const MAX_MSG = 1_500_000; // tamanho máximo de uma mensagem
 const CHUNK = 256 * 1024; // tamanho dos blocos enviados a quem entra depois
 const PART_MSGS = 8; // mensagens grandes que podem estar chegando em pedaços ao mesmo tempo
+const KEEP_MS = 5 * 60 * 1000; // depois de encerrada, quem assistiu tem 5 minutos para baixar o PDF da aula
+const KEEP_SLACK_MS = 20 * 1000; // folga para um download que começou no último instante terminar
+const BG_MAX = 128 * 1024; // maior pedaço de imagem que o espectador pode pedir
 const BG_CHUNK = 32 * 1024; // pedaço de imagem entregue a cada pedido do espectador
 
 function head(obj, body) {
@@ -87,7 +90,9 @@ export class RoomCore {
       "CREATE TABLE IF NOT EXISTS ops (seq INTEGER PRIMARY KEY AUTOINCREMENT, pg TEXT, body TEXT)"
     );
     this.sql.exec("CREATE INDEX IF NOT EXISTS ops_pg ON ops (pg, seq)");
-    this.room = { code, key: randomKey(), created: Date.now(), cur: null, order: [] };
+    // pk: senha do PDF. Quem assiste a recebe ao entrar e só com ela baixa o
+    // PDF depois do fim; como fica só na memória da página, atualizar a tela a perde.
+    this.room = { code, key: randomKey(), pk: randomKey(), created: Date.now(), cur: null, order: [] };
     await this.save();
     await this.ctx.storage.setAlarm(Date.now() + HOST_GRACE_MS);
     return { ok: true, key: this.room.key };
@@ -96,14 +101,17 @@ export class RoomCore {
   async status(key) {
     const room = await this.load();
     if (!room) return { live: false };
+    if (room.ended) return { live: false, pdf: true }; // fora do ar; quem assistiu ainda pode baixar o PDF
     return { live: true, host: !!key && key === room.key };
   }
 
   // Decide se uma conexão pode entrar. Retorna o papel ou null.
-  async admit(key) {
+  async admit(key, pk) {
     const room = await this.load();
     if (!room) return null;
-    if (key) return key === room.key ? "host" : null;
+    if (key) return key === room.key && !room.ended ? "host" : null;
+    // depois de encerrada, só entra (para baixar o PDF) quem estava assistindo
+    if (room.ended) return room.pk && pk === room.pk ? "viewer" : null;
     return "viewer";
   }
 
@@ -124,8 +132,9 @@ export class RoomCore {
       ws.send(head({ t: "ready", viewers: this.viewerCount(), fresh: room.order.length === 0 }));
       this.toViewers(head({ t: "host", on: true }));
     } else {
-      ws.send(head({ t: "hello", order: room.order, pages: this.pageMeta(), cur: room.cur, host: this.hostOnline() }));
-      this.toHost(head({ t: "viewers", n: this.viewerCount() }));
+      ws.send(head({ t: "hello", order: room.order, pages: this.pageMeta(), cur: room.cur, host: this.hostOnline(), pk: room.pk }));
+      if (room.ended) ws.send(head({ t: "ended", pdf: 1, left: Math.max(0, room.ended + KEEP_MS - Date.now()) }));
+      else this.toHost(head({ t: "viewers", n: this.viewerCount() }));
     }
   }
 
@@ -144,6 +153,7 @@ export class RoomCore {
     }
     const body = nl < 0 ? "" : raw.slice(nl + 1);
     const role = (ws.deserializeAttachment() || {}).role;
+    if (room.ended && role === "host") return;
 
     if (role !== "host") {
       if (typeof h.id !== "string") return;
@@ -232,7 +242,7 @@ export class RoomCore {
   async closed(ws) {
     const role = (ws.deserializeAttachment() || {}).role;
     const room = await this.load();
-    if (!room) return;
+    if (!room || room.ended) return;
     if (role === "host") {
       const others = this.ctx.getWebSockets("host").filter((s) => s !== ws);
       if (others.length === 0) {
@@ -247,6 +257,11 @@ export class RoomCore {
   async alarm() {
     const room = await this.load();
     if (!room) return;
+    if (room.ended) { // já encerrada: apaga tudo quando acabar o prazo do PDF
+      if (Date.now() >= room.ended + KEEP_MS + KEEP_SLACK_MS - 1000) await this.purge();
+      else await this.ctx.storage.setAlarm(room.ended + KEEP_MS + KEEP_SLACK_MS);
+      return;
+    }
     const expired = Date.now() >= room.created + MAX_LIFE_MS;
     if (!this.hostOnline() || expired) await this.end();
     else await this.ctx.storage.setAlarm(room.created + MAX_LIFE_MS);
@@ -318,12 +333,31 @@ export class RoomCore {
     this.ensureExtra();
     q = q === "m" ? "m" : "f";
     o = Math.max(0, Math.floor(+o || 0));
-    n = Math.min(BG_CHUNK, Math.max(4096, Math.floor(+n || BG_CHUNK))); // pedaços menores, se pedido
+    n = Math.min(BG_MAX, Math.max(4096, Math.floor(+n || BG_CHUNK))); // do tamanho que o espectador pedir
     const r = this.sql.exec("SELECT length(bg) AS n, substr(bg, ?, ?) AS part FROM fulls WHERE id = ?", o + 1, n, (q === "m" ? "m:" : "") + id).toArray()[0];
     ws.send(head({ t: "bgpart", id, q, o, total: r ? Number(r.n) : 0 }, r ? r.part : ""));
   }
 
+  // A transmissão acabou (o apresentador encerrou, sumiu ou passou do tempo
+  // máximo). Ela sai do ar na hora, mas as páginas ficam guardadas por 5
+  // minutos para quem assistiu baixar o PDF da aula; depois, tudo é apagado.
   async end() {
+    const room = await this.load();
+    if (!room) return;
+    if (room.ended || !room.order.length) { await this.purge(); return; } // nada a guardar
+    room.ended = Date.now();
+    await this.save();
+    this.partBuf = null;
+    const msg = head({ t: "ended", pdf: 1, left: KEEP_MS });
+    for (const s of this.ctx.getWebSockets("host")) {
+      try { s.send(msg); } catch {}
+      try { s.close(4004, "ended"); } catch {}
+    }
+    this.toViewers(msg); // quem assiste continua conectado só para baixar o PDF
+    await this.ctx.storage.setAlarm(room.ended + KEEP_MS + KEEP_SLACK_MS);
+  }
+
+  async purge() {
     const msg = head({ t: "ended" });
     for (const s of this.ctx.getWebSockets()) {
       try { s.send(msg); } catch {}

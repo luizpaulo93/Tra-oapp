@@ -133,7 +133,7 @@ export async function exportPdf(pages, opts = {}) {
   let count = 0;
 
   for await (const page of pages()) {
-    const scale = Math.min(2, 2400 / Math.max(page.w, page.h));
+    const scale = Math.min(2, (opts.maxSide || 2400) / Math.max(page.w, page.h));
     const canvas = document.createElement("canvas");
     canvas.width = Math.round(page.w * scale);
     canvas.height = Math.round(page.h * scale);
@@ -141,7 +141,7 @@ export async function exportPdf(pages, opts = {}) {
     ctx.scale(scale, scale);
     const assets = await pageAssets(page);
     drawPageFlat(ctx, page, { ...assets, paper: opts.withPaper ? opts.paper : null, px: 1 / scale });
-    const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.9));
+    const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", opts.quality || 0.9));
     const jpeg = new Uint8Array(await blob.arrayBuffer());
     const W = (page.w * PT).toFixed(2), H = (page.h * PT).toFixed(2);
     const img = ++n, content = ++n, pg = ++n;

@@ -97,7 +97,7 @@ export class Room extends DurableObject {
     }
 
     if (url.pathname.endsWith("/ws")) {
-      const role = await this.core.admit(url.searchParams.get("key"));
+      const role = await this.core.admit(url.searchParams.get("key"), url.searchParams.get("pk"));
       if (!role) return json({ error: "not_live" }, 404);
       const pair = new WebSocketPair();
       const client = pair[0];

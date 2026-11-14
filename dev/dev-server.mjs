@@ -126,7 +126,7 @@ server.on("upgrade", async (req, socket, headBuf) => {
   const m = url.pathname.match(/^\/api\/rooms\/(\d{6})\/ws$/);
   if (!m) return socket.destroy();
   const { ctx, core, run } = room(m[1]);
-  const role = await core.admit(url.searchParams.get("key"));
+  const role = await core.admit(url.searchParams.get("key"), url.searchParams.get("pk"));
   if (!role) {
     socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
     return socket.destroy();

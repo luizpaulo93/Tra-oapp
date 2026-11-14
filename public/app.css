@@ -94,7 +94,7 @@ button { cursor: pointer; }
 .chip.is-live { background: var(--red); color: #fff; }
 .seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: 12px; background: rgba(20, 33, 61, .05); }
 .seg.is-wide { display: flex; }
-.seg.is-wide .chip { flex: 1; justify-content: center; }
+.seg.is-wide .chip { flex: 1 1 auto; min-width: 0; padding: 0 10px; justify-content: center; }
 .seg .chip.is-on, .seg .ib.is-on { background: var(--paper); box-shadow: 0 1px 3px rgba(20, 33, 61, .14); }
 .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .row.end { justify-content: flex-end; margin-top: 8px; }
@@ -232,7 +232,7 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 }
 .menu button:hover { background: rgba(20, 33, 61, .06); }
 .menu button.is-danger { color: var(--red); }
-.panel { display: grid; gap: 14px; width: 290px; padding: 12px; }
+.panel { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; width: min(340px, calc(100vw - 28px)); padding: 12px; }
 .panel h3 { font-size: 16px; font-weight: 800; }
 
 .toasts { position: fixed; z-index: 70; left: 0; right: 0; bottom: calc(20px + env(safe-area-inset-bottom)); display: grid; justify-items: center; gap: 8px; pointer-events: none; padding: 0 16px; }

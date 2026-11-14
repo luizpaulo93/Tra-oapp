@@ -4,7 +4,10 @@
 import { Board } from "./board.js";
 import * as ink from "./ink.js";
 import { ViewerLink } from "./net.js";
-import { h, icon, formatCode, toast, toggleFullscreen, fullscreenButton } from "./ui.js";
+import { h, icon, formatCode, toast, sleep, toggleFullscreen, fullscreenButton } from "./ui.js";
+import { exportPdf, download } from "./pdfio.js";
+
+const PDF_MS = 5 * 60 * 1000; // prazo para baixar o PDF depois do fim da aula
 
 export class Viewer {
   constructor(root, code, opts) {
@@ -71,6 +74,7 @@ export class Viewer {
       else if (a === "prev") this.browse(-1);
       else if (a === "next") this.browse(1);
       else if (a === "follow") { this.follow = true; this.followView = true; this.show(this.cur); }
+      else if (a === "pdf") this.downloadPdf();
     });
 
     const link = new ViewerLink(code);
@@ -90,6 +94,7 @@ export class Viewer {
     window.removeEventListener("resize", this.onResize);
     clearTimeout(this.rsz);
     clearTimeout(this.dlTimer);
+    clearTimeout(this.pdfTimer);
     cancelAnimationFrame(this.anim);
     this.link.close();
     this.board.destroy();
@@ -105,16 +110,136 @@ export class Viewer {
   }
 
   status(s) {
+    if (this.over) return; // a aula acabou: o aviso de encerrada fica
     const wait = s !== "open";
     this.elLive.classList.toggle("is-wait", wait || !this.hostOn);
     this.elStatus.textContent = s === "open" ? (this.hostOn ? "Ao vivo" : "Apresentador reconectando…") : "Reconectando…";
   }
 
+  // O apresentador encerrou. Só agora quem assistiu pode baixar o PDF da
+  // aula (todas as páginas, com o que foi escrito), para guardar no aparelho.
   ended() {
+    if (this.over) return;
+    this.over = true;
+    this.hostOn = false;
+    this.board.liveStrokes.clear();
+    this.board.invalidateLive();
     this.elLive.classList.add("is-wait");
     this.elStatus.textContent = "Encerrada";
     this.elMsg.hidden = false;
-    this.elMsg.innerHTML = `<div class="v-card"><h2>A transmissão foi encerrada</h2><p class="muted">O apresentador finalizou esta transmissão.</p><button class="btn is-primary" data-a="exit">Voltar ao início</button></div>`;
+    // o PDF só pode ser baixado nos 5 minutos seguintes ao fim da aula, e só
+    // por quem ficou nesta tela (atualizar a página fecha a aula de vez)
+    const left = this.link.left === undefined ? PDF_MS : this.link.left;
+    const pdf = this.order.length > 0 && !this.link.gone && left > 3000;
+    const mins = Math.max(1, Math.round(left / 60000));
+    this.elMsg.innerHTML = `<div class="v-card"><h2>O apresentador parou de apresentar</h2>
+      <p class="muted" data-pdf-text>${pdf ? `Você pode baixar o PDF da aula para guardar no seu aparelho. O botão fica disponível por ${mins === 1 ? "1 minuto" : mins + " minutos"}; se sair ou atualizar a página, não dá mais para baixar.` : "Esta transmissão foi encerrada."}</p>
+      ${pdf ? '<button class="btn is-primary" data-a="pdf">Baixar o PDF da aula</button>' : ""}
+      <button class="btn${pdf ? "" : " is-primary"}" data-a="exit">Voltar ao início</button></div>`;
+    if (pdf) this.pdfTimer = setTimeout(() => this.pdfExpired(), left);
+  }
+
+  // Acabou o prazo: o botão de baixar some (um download já em andamento termina).
+  pdfExpired() {
+    this.pdfOver = true;
+    if (this.pdfBusy || this.dead) return;
+    const btn = this.elMsg.querySelector('[data-a="pdf"]');
+    if (btn) btn.remove();
+    const t = this.elMsg.querySelector("[data-pdf-text]");
+    if (t && !this.pdfDone) t.textContent = "O prazo para baixar o PDF desta aula terminou.";
+    const exit = this.elMsg.querySelector('[data-a="exit"]');
+    if (exit) exit.classList.add("is-primary");
+  }
+
+  // Espera uma condição ficar verdadeira (ou o tempo acabar).
+  async until(test, ms) {
+    const t0 = performance.now();
+    while (!test()) {
+      if (this.dead) throw new Error("saiu");
+      if (performance.now() - t0 > ms) return false;
+      await sleep(100);
+    }
+    return true;
+  }
+
+  // Busca no servidor uma página inteira para o PDF: traços, fotos e a imagem
+  // de fundo na melhor qualidade que existir. Devolve null se ela não existe.
+  async pdfPage(id) {
+    for (let tries = 0; tries < 5; tries++) {
+      if (this.dead) throw new Error("saiu");
+      if (!(await this.link.open())) {
+        let pdf = null;
+        try { pdf = !!(await (await fetch(`/api/rooms/${this.code}`, { cache: "no-store" })).json()).pdf; } catch {}
+        if (pdf === false) throw new Error("O prazo para baixar o PDF desta aula terminou.");
+        await sleep(1500);
+        continue;
+      }
+      const ready = () => { const q = this.pages.get(id); return !!q && (q.done || q.missing); };
+      if (!ready()) {
+        const p = this.meta(id);
+        p.state = "req";
+        this.link.get(id, this.imgCache.has(id));
+        if (!(await this.until(ready, 25000))) { this.link.reset(); continue; } // sem resposta: reconecta e tenta de novo
+      }
+      const p = this.pages.get(id);
+      if (p.missing) return null;
+      const want = p.full ? "f" : p.med ? "m" : null;
+      const have = () => { const c = this.imgCache.get(id); return c && (c.q === "f" || want === "m") ? c : null; };
+      if (want && !have()) {
+        this.pdfId = id;
+        this.pumpFull();
+        let got = -1, at = performance.now();
+        const ok = await this.until(() => {
+          if (have() || this.pages.get(id) !== p) return true;
+          const st = this.partial.get(want + ":" + id);
+          const n = st ? st.got : 0;
+          if (n !== got) { got = n; at = performance.now(); }
+          return performance.now() - at > 25000; // parou de chegar
+        }, 600000);
+        this.pdfId = null;
+        if (!ok || !have()) { if (this.pages.get(id) === p) this.link.reset(); this.dlBusy = null; continue; }
+      }
+      const c = want ? have() : null;
+      return { id, w: p.w, h: p.h, items: p.items, bg: c ? c.bg : p.bg };
+    }
+    throw new Error("A conexão falhou ao baixar o PDF. Confira a internet e tente de novo.");
+  }
+
+  async downloadPdf() {
+    if (this.pdfBusy || this.pdfOver) return;
+    this.pdfBusy = true;
+    const btn = this.elMsg.querySelector('[data-a="pdf"]');
+    const say = (t) => { if (btn) btn.textContent = t; };
+    if (btn) btn.disabled = true;
+    const ids = this.order.slice();
+    const self = this;
+    try {
+      say(`Preparando o PDF… página 1 de ${ids.length}`);
+      let pages = 0;
+      const blob = await exportPdf(async function* () {
+        for (let i = 0; i < ids.length; i++) {
+          say(`Preparando o PDF… página ${i + 1} de ${ids.length}`);
+          const pg = await self.pdfPage(ids[i]);
+          if (pg) { pages++; yield pg; }
+        }
+      }, { maxSide: 2000, quality: 0.86 });
+      if (!pages) throw new Error("Esta aula não tem páginas para baixar.");
+      const d = new Date(), two = (n) => String(n).padStart(2, "0");
+      download(blob, `Aula ${two(d.getDate())}-${two(d.getMonth() + 1)}-${d.getFullYear()}.pdf`);
+      this.pdfDone = true;
+      say("Baixar o PDF de novo");
+      const t = this.elMsg.querySelector("[data-pdf-text]");
+      if (t) t.textContent = "PDF pronto. Confira os downloads do seu aparelho.";
+    } catch (e) {
+      if (this.dead) return;
+      say("Tentar de novo");
+      toast(e && e.message ? e.message : "Não foi possível montar o PDF.", { error: true, ms: 7000 });
+    } finally {
+      this.pdfBusy = false;
+      this.pdfId = null;
+      if (btn) btn.disabled = false;
+      if (this.pdfOver && !this.dead) this.pdfExpired(); // o prazo acabou durante o download
+    }
   }
 
   meta(id) {
@@ -158,6 +283,7 @@ export class Viewer {
       case "page": {
         const p = this.meta(m.id);
         p.w = m.w; p.h = m.h;
+        p.done = false; p.missing = false;
         if (p.state !== "none") { p.state = "none"; p.items = []; delete p.bg; delete p.bgImg; }
         if (this.wanted === m.id) this.show(m.id, true);
         break;
@@ -184,6 +310,7 @@ export class Viewer {
           break;
         }
         p.w = m.w; p.h = m.h; p.items = []; p.state = "ok";
+        p.done = false; p.missing = false;
         p.med = m.med || 0;
         p.full = m.full || 0;
         const bg = have ? have.bg : body || undefined;
@@ -209,10 +336,11 @@ export class Viewer {
         break;
       }
       case "pageend":
+        { const p = this.pages.get(m.id); if (p && p.state === "ok") p.done = true; }
         if (this.wanted === m.id) this.display(m.id);
         break;
       case "nopage":
-        { const p = this.pages.get(m.id); if (p) p.state = "none"; }
+        { const p = this.pages.get(m.id); if (p) { p.state = "none"; p.missing = true; } }
         break;
       case "op": {
         const p = this.pages.get(m.pg);
@@ -313,12 +441,13 @@ export class Viewer {
   pumpFull() {
     clearTimeout(this.dlTimer);
     if (this.dead || this.dlBusy) return;
-    const id = this.showing;
+    const pdf = !!this.pdfId; // montando o PDF: vai direto à melhor qualidade
+    const id = this.pdfId || this.showing;
     const p = id && this.pages.get(id);
     if (!p || p.state !== "ok") return;
     const have = this.imgCache.get(id);
     let q = null;
-    if (!have && p.med) q = "m";
+    if (!have && p.med && !(pdf && p.full)) q = "m";
     else if (p.full && (!have || have.q !== "f")) q = "f";
     if (!q) return;
     const total = q === "m" ? p.med : p.full;
@@ -333,7 +462,7 @@ export class Viewer {
     // para não segurar os traços ao vivo nem a troca de página
     const writing = performance.now() - this.lastLive < 500;
     const fit = this.dlRate ? this.dlRate * (writing ? 0.25 : 0.4) : 8192;
-    const n = Math.max(4096, Math.min(writing ? 8192 : 32768, Math.round(fit)));
+    const n = Math.max(4096, Math.min(writing ? 8192 : pdf ? 131072 : 32768, Math.round(fit)));
     if (this.link.getBg(id, q, st.got, n)) {
       this.dlBusy = key;
       this.dlAt = performance.now();

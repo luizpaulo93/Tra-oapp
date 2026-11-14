@@ -38,9 +38,9 @@ export async function api(path, body, method) {
   return data;
 }
 
-function wsUrl(code, key) {
+function wsUrl(code, key, pk) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}/api/rooms/${code}/ws${key ? "?key=" + key : ""}`;
+  return `${proto}//${location.host}/api/rooms/${code}/ws${key ? "?key=" + key : pk ? "?pk=" + pk : ""}`;
 }
 
 const pack = (h, body) => JSON.stringify(h) + "\n" + (body === undefined ? "" : body);
@@ -90,14 +90,14 @@ class Link {
   connect() {
     if (this.closed) return;
     this.started = true;
-    const ws = new WebSocket(wsUrl(this.code, this.key));
+    const ws = new WebSocket(wsUrl(this.code, this.key, this.archive ? this.pk : ""));
     this.ws = ws;
     this.rx = 0; // contador de mensagens recebidas nesta conexão
     ws.onopen = () => {
       if (this.ws !== ws) return;
       this.tries = 0;
       this.silent = 0;
-      this.setState("open");
+      if (!this.archive) this.setState("open");
       clearInterval(this.pinger);
       this.pinger = setInterval(() => {
         if (this.ws !== ws || ws.readyState !== 1) return;
@@ -115,7 +115,8 @@ class Link {
       if (ev.data === "pong") return;
       const [h, body] = unpack(ev.data);
       if (!h) return;
-      if (h.t === "ended") { this.finish(); return; }
+      if (h.t === "hello" && h.pk) this.pk = h.pk; // senha para baixar o PDF no final (não é guardada)
+      if (h.t === "ended") { if (!h.pdf) this.gone = true; else if (this.left === undefined) this.left = +h.left || 0; this.finish(); return; }
       this.onMessage(h, body);
     };
     ws.onclose = (ev) => this.dropped(ws, ev.code);
@@ -126,8 +127,15 @@ class Link {
   dropped(ws, code) {
     if (this.closed || this.ws !== ws) return;
     clearInterval(this.pinger);
-    if (code === 4004) { this.finish(); return; }
     if (code === 4001) { this.closed = true; this.unhook(); this.setState("replaced"); return; }
+    if (code === 4004 || this.archive) { // a transmissão acabou: não reconecta sozinha
+      if (code === 4004 && this.archive) this.gone = true; // o prazo do PDF também acabou
+      this.finish();
+      if (this.ws === ws) this.ws = null;
+      ws.onopen = ws.onmessage = ws.onclose = null;
+      try { ws.close(); } catch {}
+      return;
+    }
     this.ws = null;
     ws.onopen = ws.onmessage = ws.onclose = null;
     try { ws.close(); } catch {}
@@ -417,6 +425,45 @@ export class BulkSender {
 }
 
 export class ViewerLink extends Link {
+  // A aula acabou. A conexão para de se refazer sozinha, mas continua
+  // servindo para baixar o PDF (o servidor guarda a aula por um tempo).
+  finish() {
+    if (this.closed || this.archive) return;
+    this.archive = true;
+    if (!this.pk) this.gone = true; // não estava assistindo (ou atualizou a página): sem PDF
+    this.unhook();
+    this.setState("ended");
+    this.onEnded();
+  }
+
+  // Larga a conexão atual (parou de responder); a próxima `open()` abre outra.
+  reset() {
+    const ws = this.ws;
+    if (!ws) return;
+    this.ws = null;
+    clearInterval(this.pinger);
+    ws.onopen = ws.onmessage = ws.onclose = null;
+    try { ws.close(); } catch {}
+  }
+
+  // Depois do fim da aula: garante uma conexão aberta para baixar o PDF.
+  // Devolve false se não conseguir (sem internet ou prazo encerrado).
+  open(ms = 12000) {
+    if (this.isOpen) return Promise.resolve(true);
+    if (this.closed || this.gone) return Promise.resolve(false);
+    if (!this.ws || this.ws.readyState > 1) { this.ws = null; this.connect(); }
+    const ws = this.ws, t0 = Date.now();
+    return new Promise((res) => {
+      const iv = setInterval(() => {
+        const ok = this.ws === ws && ws.readyState === 1;
+        if (!ok && this.ws === ws && ws.readyState === 0 && Date.now() - t0 < ms && !this.closed) return; // ainda conectando
+        clearInterval(iv);
+        if (!ok && this.ws === ws) { this.ws = null; ws.onopen = ws.onmessage = ws.onclose = null; try { ws.close(); } catch {} }
+        res(ok);
+      }, 120);
+    });
+  }
+
   // Pede uma página. `nobg`: a imagem dela já está guardada aqui.
   get(id, nobg) {
     if (this.isOpen) this.ws.send(pack(nobg ? { t: "get", id, nobg: 1 } : { t: "get", id }));

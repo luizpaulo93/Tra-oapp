@@ -1135,7 +1135,16 @@ export class Editor {
       }
     };
     m.el.querySelector("[data-qr]").onclick = () => this.qrFull();
-    m.el.querySelector("[data-stop]").onclick = () => this.stopLive();
+    m.el.querySelector("[data-stop]").onclick = async () => {
+      // quem assiste baixa o PDF da aula ao final: avisa se ainda falta enviar páginas em boa qualidade
+      const pending = this.bulk && (this.bulk.size > 0 || this.nb.pages.some((id) => !this.uploaded.has(id)));
+      if (pending && !(await confirmBox({
+        title: "Encerrar agora?",
+        text: "Algumas páginas ainda estão sendo enviadas em boa qualidade. Se encerrar agora, elas podem sair menos nítidas no PDF que quem assiste baixa no final.",
+        ok: "Encerrar agora", cancel: "Esperar um pouco",
+      }))) return;
+      this.stopLive();
+    };
   }
 
   // QR code ocupando a tela toda, para a turma apontar a câmera.
