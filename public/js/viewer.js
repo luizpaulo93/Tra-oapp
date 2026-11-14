@@ -4,7 +4,7 @@
 import { Board } from "./board.js";
 import * as ink from "./ink.js";
 import { ViewerLink } from "./net.js";
-import { h, icon, formatCode, toast, toggleFullscreen, NO_FULLSCREEN } from "./ui.js";
+import { h, icon, formatCode, toast, toggleFullscreen, fullscreenButton } from "./ui.js";
 
 export class Viewer {
   constructor(root, code, opts) {
@@ -101,7 +101,7 @@ export class Viewer {
   }
 
   fullscreen() {
-    if (!toggleFullscreen()) toast(NO_FULLSCREEN, { ms: 8000 });
+    fullscreenButton();
   }
 
   status(s) {
@@ -239,6 +239,13 @@ export class Viewer {
   applyOp(p, text) {
     let op;
     try { op = JSON.parse(text); } catch { return null; }
+    // foto que só mudou de lugar, tamanho ou giro: a imagem é a que já está aqui
+    for (const it of op.p || []) {
+      if (it.k !== "i" || it.src || !it.sr) continue;
+      const old = p.items.find((x) => x.id === it.id);
+      if (old && old.src) it.src = old.src;
+      delete it.sr;
+    }
     p.items = ink.applyOp(p.items, op.d, op.p);
     return op;
   }
@@ -268,8 +275,10 @@ export class Viewer {
     } else if (m.k === "sx") {
       b.liveStrokes.delete(m.id);
     } else if (m.k === "lz") {
-      const now = performance.now();
-      for (let i = 0; i < m.p.length; i += 2) b.laser.push({ x: m.p[i], y: m.p[i + 1], t: now, brk: m.n && i === 0 });
+      const pts = Array.isArray(m.p) ? m.p : [];
+      b.laserBegin();
+      for (let i = 0; i < pts.length; i += 2) b.laser.push({ x: pts[i], y: pts[i + 1], brk: m.n && i === 0 });
+      b.laserDown = !m.e; // "e": o apresentador soltou; some 2 s depois, se não voltar a marcar
     }
     b.invalidateLive();
   }

@@ -6,7 +6,7 @@ import * as ink from "./ink.js";
 import * as store from "./store.js";
 import { api, HostLink, BulkSender } from "./net.js";
 import { readPdf, readImage, exportPdf, download, pageAssets } from "./pdfio.js";
-import { h, esc, icon, toast, modal, confirmBox, popover, sleep, formatCode, toggleFullscreen, NO_FULLSCREEN } from "./ui.js";
+import { h, esc, icon, toast, modal, confirmBox, popover, sleep, formatCode, fullscreenButton } from "./ui.js";
 import { qrSvg } from "./qr.js";
 
 const PEN_COLORS = ["#14213d", "#2347d9", "#e5383b", "#1e9e61", "#f08c00", "#7c3aed"];
@@ -29,7 +29,7 @@ const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 
 const TOOLS = [
   ["pen", "Caneta"], ["hl", "Marca-texto"], ["eraser", "Borracha"],
-  ["lasso", "Selecionar e mover"], ["shape", "Formas"], ["laser", "Laser (só aponta, não risca)"],
+  ["lasso", "Selecionar, mover, girar e redimensionar"], ["shape", "Formas"], ["laser", "Laser (só aponta, não risca)"],
   ["hand", "Mão: mover a folha e dar zoom"],
 ];
 
@@ -238,7 +238,7 @@ export class Editor {
       case "pages": this.pagesPanel(); break;
       case "paper": this.paperPop(btn); break;
       case "export": this.exportDialog(); break;
-      case "full": if (!toggleFullscreen()) toast(NO_FULLSCREEN, { ms: 8000 }); break;
+      case "full": fullscreenButton(); break;
       case "rename": this.renameDialog(btn); break;
       case "live": this.link ? this.livePanel() : this.startLive(); break;
     }
@@ -413,12 +413,19 @@ export class Editor {
   apply(a, o = {}) {
     const p = this.pages.get(a.pg);
     if (!p) return;
+    // fotos que só mudaram de lugar, tamanho ou giro: quem assiste já tem a imagem
+    let keep = null;
+    for (const it of a.put) {
+      if (it.k !== "i" || !it.src) continue;
+      const old = p.items.find((x) => x.id === it.id);
+      if (old && old.k === "i" && old.src === it.src) (keep || (keep = new Set())).add(it.id);
+    }
     p.items = ink.applyOp(p.items, a.del.map((it) => it.id), a.put);
     if (p === this.page) {
       if (o.stroke) this.board.commitStroke(a.put[0]);
       else { this.board.renderBg(); this.board.renderInk(); this.board.drawLive(); }
     }
-    this.sendOp(a.pg, a.del.map((it) => it.id), a.put);
+    this.sendOp(a.pg, a.del.map((it) => it.id), a.put, keep);
     this.dirty(p);
   }
 
@@ -499,7 +506,7 @@ export class Editor {
       opts += `<div class="seg"><button class="chip${p.er.mode === "part" ? " is-on" : ""}" data-er="part">Parcial</button><button class="chip${p.er.mode === "stroke" ? " is-on" : ""}" data-er="stroke">Traço inteiro</button></div>` + size("er", 8, 70, p.er.w);
     } else if (t === "lasso") {
       opts += this.sel
-        ? `<button class="chip is-danger" data-sel="del">${icon("trash", 16)} Excluir seleção</button>`
+        ? `<button class="chip is-danger" data-sel="del">${icon("trash", 16)} Excluir seleção</button><span class="hint">Canto: tamanho · bolinha: girar</span>`
         : `<span class="hint">Contorne os traços ou toque em uma imagem</span>`;
     } else if (t === "laser") {
       opts += `<span class="hint">Quem assiste vê o ponteiro, e nada fica riscado</span>`;
@@ -575,8 +582,10 @@ export class Editor {
       this.board.cursor = { x: pt.x, y: pt.y, r: p.er.w / 2 };
       this.board.invalidateLive();
     } else if (tool === "laser") {
-      this.act = { tool, pg, pend: [], first: true };
-      this.board.laser.push({ x: pt.x, y: pt.y, t: performance.now(), brk: true });
+      this.act = { tool, pg, pend: [], first: true, lz: 0 };
+      this.board.laserBegin();
+      this.board.laserDown = true;
+      this.board.laser.push({ x: pt.x, y: pt.y, brk: true });
       this.act.pend.push(ink.r1(pt.x), ink.r1(pt.y));
       this.board.invalidateLive();
     } else if (tool === "lasso") {
@@ -639,11 +648,11 @@ export class Editor {
       if (a.touched) { a.touched = false; this.board.renderInk(); }
       this.board.invalidateLive();
     } else if (a.tool === "laser") {
-      const now = performance.now();
       for (const p of pts) {
-        this.board.laser.push({ x: p.x, y: p.y, t: now });
+        this.board.laser.push({ x: p.x, y: p.y });
         a.pend.push(ink.r1(p.x), ink.r1(p.y));
       }
+      this.board.laserAt = performance.now();
       this.board.invalidateLive();
     } else if (a.tool === "lasso") {
       this.lassoMove(pts[pts.length - 1]);
@@ -679,6 +688,11 @@ export class Editor {
       }
     } else if (a.tool === "laser") {
       this.liveTickFor(a);
+      // soltou: o que foi marcado fica mais 2 s (ou até voltar a marcar)
+      this.board.laserDown = false;
+      this.board.laserAt = performance.now();
+      this.board.invalidateLive();
+      this.sendLive({ k: "lz", pg: a.pg, n: a.first ? 1 : 0, p: a.pend, e: 1 }, true);
     } else if (a.tool === "lasso") {
       this.lassoEnd(a, cancel);
     }
@@ -731,17 +745,19 @@ export class Editor {
     const sel = this.sel;
     let mode = null;
     if (sel) {
-      const b = sel.box;
-      if (sel.single && Math.hypot(pt.x - b[2], pt.y - b[3]) < 18 * px) mode = "resize";
+      const b = sel.box, hd = this.board.selHandles(), near = 20 * px;
+      if (Math.hypot(pt.x - hd.rz[0], pt.y - hd.rz[1]) < near) mode = "resize";
+      else if (Math.hypot(pt.x - hd.rot[0], pt.y - hd.rot[1]) < near) mode = "rotate";
       else if (pt.x >= b[0] - 8 * px && pt.x <= b[2] + 8 * px && pt.y >= b[1] - 8 * px && pt.y <= b[3] + 8 * px) mode = "move";
     }
     if (!mode) {
       let img = null;
-      for (const it of page.items) if (it.k === "i" && pt.x >= it.x && pt.x <= it.x + it.w && pt.y >= it.y && pt.y <= it.y + it.h) img = it;
+      for (const it of page.items) if (it.k === "i" && ink.inImage(it, pt.x, pt.y)) img = it;
       if (img) { this.select([img]); mode = "move"; }
     }
     if (mode) {
-      this.act = { tool: "lasso", pg: page.id, mode, x0: pt.x, y0: pt.y };
+      const b = this.sel.box;
+      this.act = { tool: "lasso", pg: page.id, mode, x0: pt.x, y0: pt.y, cx: (b[0] + b[2]) / 2, cy: (b[1] + b[3]) / 2 };
       this.board.hidden = new Set(this.sel.items.map((it) => it.id));
       this.board.renderBg();
       this.board.renderInk();
@@ -757,10 +773,16 @@ export class Editor {
     const a = this.act;
     const s = this.board.selection;
     if (a.mode === "draw") a.path.push(pt.x, pt.y);
-    else if (a.mode === "move") { s.dx = pt.x - a.x0; s.dy = pt.y - a.y0; }
-    else if (a.mode === "resize") {
-      const b = this.sel.box;
-      s.scale = clamp((pt.x - b[0]) / (b[2] - b[0]), 0.08, 12);
+    else if (a.mode === "move") s.m = { dx: pt.x - a.x0, dy: pt.y - a.y0 };
+    else if (a.mode === "resize") { // puxando o canto: o canto oposto fica no lugar
+      const b = this.sel.box, w = b[2] - b[0], hh = b[3] - b[1];
+      const k = ((pt.x - b[0]) * w + (pt.y - b[1]) * hh) / (w * w + hh * hh);
+      s.m = { k: clamp(k, 0.08, 12), ox: b[0], oy: b[1] };
+    } else if (a.mode === "rotate") { // gira em torno do centro da seleção
+      let rot = Math.atan2(pt.y - a.cy, pt.x - a.cx) - Math.atan2(a.y0 - a.cy, a.x0 - a.cx);
+      const q = Math.PI / 2, near = Math.round(rot / q) * q;
+      if (Math.abs(rot - near) < 0.045) rot = near; // encaixa em 90°
+      s.m = { rot, ox: a.cx, oy: a.cy };
     }
     this.board.invalidateLive();
   }
@@ -776,16 +798,16 @@ export class Editor {
       board.invalidateLive();
       return;
     }
-    const s = board.selection;
+    const m = board.selection.m;
     const items = this.sel.items;
     board.hidden = new Set();
-    let next = null;
-    if (!cancel && a.mode === "move" && Math.abs(s.dx) + Math.abs(s.dy) > 0.5) next = items.map((it) => ink.moved(it, s.dx, s.dy));
-    if (!cancel && a.mode === "resize" && Math.abs(s.scale - 1) > 0.01) {
-      const it = items[0];
-      next = [{ ...it, w: ink.r1(it.w * s.scale), h: ink.r1(it.h * s.scale) }];
-    }
-    if (next) {
+    board.selection.m = null;
+    const changed = !cancel && m && (
+      (a.mode === "move" && Math.abs(m.dx) + Math.abs(m.dy) > 0.5) ||
+      (a.mode === "resize" && Math.abs(m.k - 1) > 0.01) ||
+      (a.mode === "rotate" && Math.abs(Math.sin(m.rot / 2)) > 0.004));
+    if (changed) {
+      const next = items.map((it) => ink.transformed(it, m));
       this.commit({ pg: a.pg, del: items, put: next });
       this.select(next);
     } else {
@@ -804,7 +826,7 @@ export class Editor {
     const single = items.length === 1 && items[0].k === "i";
     if (!single) b = [b[0] - 6, b[1] - 6, b[2] + 6, b[3] + 6];
     this.sel = { items, box: b, single };
-    this.board.selection = { box: b, items, dx: 0, dy: 0, scale: 1, handle: single };
+    this.board.selection = { box: b, items, m: null };
     this.board.invalidateLive();
     if (this.prefs.tool === "lasso") { this.optsOpen = true; this.renderTools(); } // mostra "Excluir seleção"
   }
@@ -858,7 +880,7 @@ export class Editor {
     this.prefs.tool = "lasso";
     this.select([it]);
     this.renderTools();
-    toast("Arraste a imagem para posicionar. Puxe o canto para mudar o tamanho.");
+    toast("Arraste a imagem para posicionar. Puxe o canto para mudar o tamanho e a bolinha para girar.");
   }
 
   async insertPdf(file) {
@@ -1135,10 +1157,11 @@ export class Editor {
   // Alteração definitiva em uma página. Traços vão direto. O que é pesado
   // (uma foto, por exemplo) vai pela fila dosada; e qualquer alteração em um
   // item que ainda está a caminho entra na fila atrás dele, para não chegar antes.
-  sendOp(pg, d, p) {
+  // `keep`: ids de fotos que quem assiste já tem (vai só a posição nova).
+  sendOp(pg, d, p, keep) {
     const link = this.link;
     if (!link || !this.uploaded.has(pg)) return;
-    const body = JSON.stringify({ d, p });
+    const body = JSON.stringify({ d, p: keep ? p.map((it) => (keep.has(it.id) ? { ...it, src: undefined, sr: 1 } : it)) : p });
     const waits = this.pendingIds.size && (d.some((id) => this.pendingIds.has(id)) || p.some((it) => this.pendingIds.has(it.id)));
     if (body.length <= DIRECT_MAX && !waits) { link.send({ t: "op", pg }, body); return; }
     this.bulk.add(this.bulkOp(pg, body, [...d, ...p.map((it) => it.id)]));
@@ -1190,15 +1213,18 @@ export class Editor {
 
   liveTickFor(a) {
     if (a.tool === "eraser") { this.flushErase(a); return; }
+    if (a.tool === "laser" && this.board.laserDown) this.board.laserAt = performance.now(); // caneta encostada: não some
     if (!this.link) return;
     if (a.tool === "pen" || a.tool === "hl") {
       const n = a.s.p.length / 3;
       if (n > a.sent && this.sendLive({ k: "sp", pg: a.pg, id: a.s.id, t: a.s.t, c: a.s.c, w: a.s.w, p: a.s.p.slice(a.sent * 3) })) a.sent = n;
     } else if (a.tool === "shape" && a.changed) {
       if (this.sendLive({ k: "sp", pg: a.pg, id: a.s.id, t: "pen", c: a.s.c, w: a.s.w, r: 1, g: 1, d: a.s.d, dn: a.s.dn, p: a.s.p })) a.changed = false;
-    } else if (a.tool === "laser" && a.pend.length) {
-      if (this.sendLive({ k: "lz", pg: a.pg, n: a.first ? 1 : 0, p: a.pend })) { a.pend = []; a.first = false; }
-      else if (a.pend.length > 400) a.pend = a.pend.slice(-400);
+    } else if (a.tool === "laser") {
+      const now = performance.now();
+      if (a.pend.length) {
+        if (this.sendLive({ k: "lz", pg: a.pg, n: a.first ? 1 : 0, p: a.pend })) { a.pend = []; a.first = false; a.lz = now; }
+      } else if (now - a.lz > 600 && this.sendLive({ k: "lz", pg: a.pg, n: 0, p: [] })) a.lz = now; // parado, mas ainda apontando
     }
   }
 

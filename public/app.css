@@ -417,3 +417,6 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* aberto pelo ícone da Tela de Início (iPad/iPhone): já está em tela cheia */
+.is-installed [data-a="full"] { display: none; }

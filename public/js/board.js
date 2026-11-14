@@ -5,6 +5,9 @@ import { drawPaper, drawStrokes, drawImages, fillStroke, loadImage, bbox, HL_ALP
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 
+const LASER_HOLD = 2000; // o laser fica na tela por 2 s depois de parar
+const LASER_FADE = 450; // e então some suavemente
+
 export class Board {
   constructor(root, opts = {}) {
     this.root = root;
@@ -29,7 +32,9 @@ export class Board {
     this.liveStrokes = new Map();
     this.laser = [];
     this.lasso = null;
-    this.selection = null; // { box, dx, dy, scale, items, handle }
+    this.selection = null; // { box, items, m } — m: movimento/giro/escala em andamento (ink.transformed)
+    this.laserAt = 0; // última atividade do laser
+    this.laserDown = false; // o laser está encostado na tela agora?
     this.cursor = null; // { x, y, r }
     this.touches = new Map();
     this.gesture = null;
@@ -83,6 +88,7 @@ export class Board {
     cancelAnimationFrame(this.rafLive);
     cancelAnimationFrame(this.rafView);
     clearTimeout(this.viewTimer);
+    clearTimeout(this.laserTimer);
     this.root.innerHTML = "";
   }
 
@@ -204,6 +210,7 @@ export class Board {
     this.liveStrokes.clear();
     this.lasso = null;
     this.selection = null;
+    if (changed) { this.laser = []; this.laserDown = false; }
     if (page && page.bg && !page.bgImg) {
       const e = loadImage(page.bg);
       if (e.img) page.bgImg = e.img;
@@ -223,6 +230,26 @@ export class Board {
   clear(ctx) {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  }
+
+  // O laser vai ser usado agora: se o que estava marcado já tinha sumido
+  // (ou deveria ter sumido), começa do zero.
+  laserBegin() {
+    const now = performance.now();
+    const down = this.laserDown && now - this.laserAt < 8000;
+    if (!down && now - this.laserAt >= LASER_HOLD + LASER_FADE) this.laser = [];
+    this.laserAt = now;
+  }
+
+  // Onde ficam as alças da seleção: `rz` (canto, muda o tamanho) e `rot`
+  // (bolinha que gira; fica acima da seleção, ou abaixo se não couber).
+  selHandles() {
+    const sel = this.selection;
+    if (!sel) return null;
+    const px = 1 / this.view.s, b = sel.box, v = this.visibleRect();
+    const cx = (b[0] + b[2]) / 2, gap = 30 * px;
+    const above = b[1] - gap >= v[1] + 130 * px || b[3] + gap > v[3] - 80 * px;
+    return { rz: [b[2], b[3]], rot: [cx, above ? b[1] - gap : b[3] + gap], stem: [cx, above ? b[1] : b[3]] };
   }
 
   visibleRect() {
@@ -333,37 +360,51 @@ export class Board {
     ctx.globalAlpha = 1;
 
     const sel = this.selection;
-    if (sel) {
+    const m = sel && sel.m;
+    const k = (m && m.k) || 1;
+    // o que está sendo movido, girado ou redimensionado acompanha a caneta
+    const moving = () => {
+      if (!m) return;
+      ctx.translate((m.dx || 0) + (m.ox || 0), (m.dy || 0) + (m.oy || 0));
+      ctx.rotate(m.rot || 0);
+      ctx.scale(k, k);
+      ctx.translate(-(m.ox || 0), -(m.oy || 0));
+    };
+    if (sel && this.hidden.size) {
       ctx.save();
-      const k = sel.scale || 1;
-      ctx.translate(sel.dx || 0, sel.dy || 0);
-      if (this.hidden.size) {
-        for (const it of sel.items) {
-          if (it.k === "i") {
-            const img = this.getImg(it);
-            if (img) ctx.drawImage(img, it.x, it.y, it.w * k, it.h * k);
-          }
-        }
-        ctx.globalAlpha = HL_ALPHA;
-        drawStrokes(ctx, sel.items, "hl", null, true);
-        ctx.globalAlpha = 1;
-        drawStrokes(ctx, sel.items, "pen");
-      }
+      moving();
+      drawImages(ctx, sel.items, (it) => this.getImg(it));
+      ctx.globalAlpha = HL_ALPHA;
+      drawStrokes(ctx, sel.items, "hl", null, true);
+      ctx.globalAlpha = 1;
+      drawStrokes(ctx, sel.items, "pen");
       ctx.restore();
     }
     ctx.restore();
 
     if (sel) {
-      const b = sel.box, k = sel.scale || 1;
-      const x = b[0] + (sel.dx || 0), y = b[1] + (sel.dy || 0), w = (b[2] - b[0]) * k, h = (b[3] - b[1]) * k;
+      const b = sel.box;
+      ctx.save();
+      moving();
       ctx.strokeStyle = "#2347d9";
-      ctx.lineWidth = 1.5 * px;
-      ctx.setLineDash([6 * px, 4 * px]);
-      ctx.strokeRect(x, y, w, h);
+      ctx.lineWidth = (1.5 * px) / k;
+      ctx.setLineDash([(6 * px) / k, (4 * px) / k]);
+      ctx.strokeRect(b[0], b[1], b[2] - b[0], b[3] - b[1]);
       ctx.setLineDash([]);
-      if (sel.handle) {
+      ctx.restore();
+      if (!m) { // alças: canto = tamanho; bolinha com seta = girar
+        const hd = this.selHandles();
+        ctx.strokeStyle = "#2347d9";
+        ctx.lineWidth = 1.5 * px;
+        ctx.beginPath(); ctx.moveTo(hd.stem[0], hd.stem[1]); ctx.lineTo(hd.rot[0], hd.rot[1]); ctx.stroke();
         ctx.fillStyle = "#fff";
-        ctx.beginPath(); ctx.arc(x + w, y + h, 7 * px, 0, 7); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.arc(hd.rz[0], hd.rz[1], 7 * px, 0, 7); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.arc(hd.rot[0], hd.rot[1], 10 * px, 0, 7); ctx.fill(); ctx.stroke();
+        const r = 4.6 * px, a1 = -0.35;
+        ctx.beginPath(); ctx.arc(hd.rot[0], hd.rot[1], r, a1 - 4.9, a1); ctx.stroke();
+        const ex = hd.rot[0] + Math.cos(a1) * r, ey = hd.rot[1] + Math.sin(a1) * r;
+        ctx.fillStyle = "#2347d9";
+        ctx.beginPath(); ctx.moveTo(ex - 3.2 * px, ey - 1.6 * px); ctx.lineTo(ex + 2.6 * px, ey - 2.2 * px); ctx.lineTo(ex + 0.6 * px, ey + 3.4 * px); ctx.closePath(); ctx.fill();
       }
     }
 
@@ -378,25 +419,36 @@ export class Board {
       ctx.setLineDash([]);
     }
 
-    // laser: rastro vermelho que some em ~1 s
+    // laser: o que foi marcado fica na tela enquanto a pessoa continua
+    // marcando; só some (tudo junto) depois de 2 s sem usar o laser
     if (this.laser.length) {
       const now = performance.now();
-      while (this.laser.length && now - this.laser[0].t > 1100) this.laser.shift();
-      ctx.lineCap = "round"; ctx.lineJoin = "round";
-      for (let i = 1; i < this.laser.length; i++) {
-        const a = this.laser[i - 1], b = this.laser[i];
-        if (b.brk) continue;
-        const age = (now - b.t) / 1100;
-        ctx.strokeStyle = `rgba(229,56,59,${Math.max(0, 1 - age) * 0.85})`;
-        ctx.lineWidth = (5 * (1 - age * 0.5)) * px;
-        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      const down = this.laserDown && now - this.laserAt < 8000;
+      const idle = down ? 0 : now - this.laserAt;
+      clearTimeout(this.laserTimer);
+      if (idle >= LASER_HOLD + LASER_FADE) this.laser = [];
+      else {
+        const alpha = idle <= LASER_HOLD ? 1 : 1 - (idle - LASER_HOLD) / LASER_FADE;
+        ctx.lineCap = "round"; ctx.lineJoin = "round";
+        ctx.strokeStyle = `rgba(229,56,59,${0.85 * alpha})`;
+        ctx.lineWidth = 5 * px;
+        ctx.beginPath();
+        for (let i = 0; i < this.laser.length; i++) {
+          const q = this.laser[i];
+          if (i === 0 || q.brk) { ctx.moveTo(q.x, q.y); ctx.lineTo(q.x, q.y); } else ctx.lineTo(q.x, q.y);
+        }
+        ctx.stroke();
+        const last = this.laser[this.laser.length - 1];
+        if (down || idle < 700) {
+          ctx.fillStyle = "rgba(229,56,59,.95)";
+          ctx.beginPath(); ctx.arc(last.x, last.y, 5 * px, 0, 7); ctx.fill();
+        }
+        if (idle > LASER_HOLD) this.invalidateLive(); // sumindo
+        else { // parado: redesenha quando o ponteiro apaga e quando começa a sumir
+          const wait = down ? 1000 : idle < 700 ? 700 - idle : LASER_HOLD - idle;
+          this.laserTimer = setTimeout(() => this.invalidateLive(), wait + 20);
+        }
       }
-      const last = this.laser[this.laser.length - 1];
-      if (last && now - last.t < 700) {
-        ctx.fillStyle = "rgba(229,56,59,.95)";
-        ctx.beginPath(); ctx.arc(last.x, last.y, 5 * px, 0, 7); ctx.fill();
-      }
-      if (this.laser.length) this.invalidateLive();
     }
 
     if (this.cursor) {

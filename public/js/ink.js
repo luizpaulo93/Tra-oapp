@@ -204,7 +204,13 @@ function cap(out, cx, cy, ax, ay, bx, by) {
 }
 
 export function bbox(it) {
-  if (it.k === "i") return [it.x, it.y, it.x + it.w, it.y + it.h];
+  if (it.k === "i") {
+    if (!it.r) return [it.x, it.y, it.x + it.w, it.y + it.h];
+    const c = Math.abs(Math.cos(it.r)), s = Math.abs(Math.sin(it.r));
+    const hw = (it.w * c + it.h * s) / 2, hh = (it.w * s + it.h * c) / 2;
+    const cx = it.x + it.w / 2, cy = it.y + it.h / 2;
+    return [cx - hw, cy - hh, cx + hw, cy + hh];
+  }
   let b = boxCache.get(it);
   if (b) return b;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -327,6 +333,43 @@ export function moved(it, dx, dy) {
   return { ...it, p };
 }
 
+// O ponto está sobre a imagem? (leva em conta o giro dela)
+export function inImage(it, x, y) {
+  let dx = x - (it.x + it.w / 2), dy = y - (it.y + it.h / 2);
+  if (it.r) {
+    const c = Math.cos(-it.r), s = Math.sin(-it.r);
+    [dx, dy] = [dx * c - dy * s, dx * s + dy * c];
+  }
+  return Math.abs(dx) <= it.w / 2 && Math.abs(dy) <= it.h / 2;
+}
+
+// Move, gira e redimensiona um item de uma vez:
+//   p' = O + k · R(rot) · (p − O) + (dx, dy)
+// m = { k (escala), rot (giro em radianos), ox, oy (ponto fixo O), dx, dy }.
+// Traços mudam de espessura junto com o tamanho; imagens guardam o giro em `r`.
+export function transformed(it, m) {
+  const k = m.k || 1, rot = m.rot || 0, ox = m.ox || 0, oy = m.oy || 0, dx = m.dx || 0, dy = m.dy || 0;
+  const c = Math.cos(rot) * k, s = Math.sin(rot) * k;
+  const fx = (x, y) => ox + (x - ox) * c - (y - oy) * s + dx;
+  const fy = (x, y) => oy + (x - ox) * s + (y - oy) * c + dy;
+  if (it.k === "i") {
+    const cx = it.x + it.w / 2, cy = it.y + it.h / 2;
+    const w = r1(it.w * k), h = r1(it.h * k);
+    const out = { ...it, x: r1(fx(cx, cy) - w / 2), y: r1(fy(cx, cy) - h / 2), w, h };
+    let r = (it.r || 0) + rot;
+    r = Math.atan2(Math.sin(r), Math.cos(r)); // entre −π e π
+    if (Math.abs(r) > 1e-4) out.r = Math.round(r * 1e4) / 1e4; else delete out.r;
+    return out;
+  }
+  const p = it.p.slice();
+  for (let i = 0; i < p.length; i += 3) {
+    const x = p[i], y = p[i + 1];
+    p[i] = r1(fx(x, y));
+    p[i + 1] = r1(fy(x, y));
+  }
+  return { ...it, p, w: Math.max(0.4, r1(it.w * k)) };
+}
+
 // Aplica uma alteração (apagar ids, depois inserir/substituir itens).
 export function applyOp(items, delIds, putItems) {
   const del = new Set(delIds || []);
@@ -425,11 +468,18 @@ export function drawImages(ctx, items, getImg) {
   for (const it of items) {
     if (it.k !== "i") continue;
     const img = getImg(it);
+    if (it.r) { // imagem girada em torno do próprio centro
+      ctx.save();
+      ctx.translate(it.x + it.w / 2, it.y + it.h / 2);
+      ctx.rotate(it.r);
+      ctx.translate(-it.x - it.w / 2, -it.y - it.h / 2);
+    }
     if (img) ctx.drawImage(img, it.x, it.y, it.w, it.h);
     else {
       ctx.fillStyle = "#eef1f5";
       ctx.fillRect(it.x, it.y, it.w, it.h);
     }
+    if (it.r) ctx.restore();
   }
 }
 

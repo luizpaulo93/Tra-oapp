@@ -150,5 +150,31 @@ export function toggleFullscreen() {
   return true;
 }
 
+// iPad e iPhone (qualquer navegador neles) e site aberto pelo ícone da Tela de Início.
+export const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+export const STANDALONE = navigator.standalone === true || (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+if (IOS && STANDALONE) document.documentElement.classList.add("is-installed"); // já abre em tela cheia
+
+// Botão de tela cheia. No iPad, o navegador sai da tela cheia sozinho quando
+// se desliza para baixo (ao escrever, por exemplo) e o site não tem como
+// impedir; por isso, lá o botão explica como abrir o app em tela cheia fixa.
+export function fullscreenButton() {
+  const d = document;
+  if (d.fullscreenElement || d.webkitFullscreenElement) { toggleFullscreen(); return; }
+  if (!IOS) { if (!toggleFullscreen()) toast(NO_FULLSCREEN, { ms: 8000 }); return; }
+  const can = !!(d.documentElement.requestFullscreen || d.documentElement.webkitRequestFullscreen);
+  const m = modal(
+    `<h2>Tela cheia no ${/iPhone|iPod/.test(navigator.userAgent) ? "iPhone" : "iPad"}</h2>
+     <p class="muted">Aqui o navegador sai da tela cheia sozinho quando a caneta ou o dedo desliza para baixo, e o site não consegue impedir.</p>
+     <p class="muted">Para ficar em tela cheia o tempo todo, toque em <b>Compartilhar</b> e em <b>Adicionar à Tela de Início</b>, e abra o Traço pelo ícone. Lá não há barras do navegador e a tela não sai do lugar ao escrever.</p>
+     <p class="muted">Os cadernos ficam guardados em cada lugar separadamente: antes de trocar, baixe em PDF os que estão aqui.</p>
+     <div class="row end">${can ? '<button class="btn" data-native>Usar a tela cheia do navegador</button>' : ""}
+     <button class="btn is-primary" data-close autofocus>Entendi</button></div>`,
+    { cls: "is-small" }
+  );
+  const b = m.el.querySelector("[data-native]");
+  if (b) b.onclick = () => { m.close(); toggleFullscreen(); };
+}
+
 export const NO_FULLSCREEN =
   "Este navegador não permite tela cheia. No iPad, abra o site no Safari e use Compartilhar → Adicionar à Tela de Início: ele abre sem as barras.";
